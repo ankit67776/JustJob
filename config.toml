@@ -1,0 +1,427 @@
+# Just Job configuration. API keys and tokens go in .env, never here.
+# After editing filters, run `python -m justjob refilter` to re-apply them to stored jobs.
+
+[profile]
+# Used by the filters, the rule-based ranking and the AI prompt. Edit freely.
+summary = "Full-stack / AI engineer with 3+ years of experience: Python, ML and LLM apps (RAG, agents), backend APIs and React frontends."
+years_experience = 3.3
+max_years_required = 4          # jobs that clearly require more than this are dropped
+skills = [
+    "python", "pytorch", "tensorflow", "scikit-learn", "machine learning", "deep learning",
+    "llm", "rag", "agents", "prompt engineering", "openai", "gemini",
+    "fastapi", "django", "node.js", "sql", "rest api", "docker",
+    "react", "typescript", "javascript", "next.js",
+]
+target_roles = ["AI Engineer", "Full Stack Engineer", "Backend Engineer", "ML Engineer", "Software Engineer"]
+# Told to the AI. Skills only affect ranking; a job is never dropped for missing skills.
+preferences = "Priority: AI engineering first, then full-stack and backend, then frontend. Missing a few listed skills is fine if the overall fit is good."
+avoid = ["sales or solutions engineering", "staff, principal or lead roles", "mobile (iOS/Android)"]
+# Optional plain-text resume (relative to this folder). Used only by the AI step.
+resume_file = "resume.txt"
+
+[filters.title]
+# A title passes if it has a role word AND a domain word ("Backend" + "Engineer"),
+# or any `standalone` phrase on its own. Matching is case-insensitive, whole words.
+role_words = ["engineer", "engineers", "developer", "developers", "scientist", "programmer"]
+domain_words = [
+    "software", "backend", "back-end", "back end", "full stack", "fullstack", "full-stack", "python",
+    "frontend", "front-end", "front end", "web", "ui", "react", "javascript", "typescript", "node",
+    "machine learning", "ml", "ai", "ai/ml", "artificial intelligence", "llm", "llms", "genai",
+    "generative ai", "deep learning", "nlp", "computer vision", "applied", "research", "inference",
+    "model", "models", "agent", "agents", "agentic", "platform", "infrastructure", "data", "mlops",
+    "product", "api", "distributed systems", "cloud", "forward deployed", "rag", "systems",
+]
+standalone = ["swe", "sde", "sde 1", "sde i", "sde 2", "sde ii", "mle", "member of technical staff"]
+# Any of these rejects the title.
+exclude = [
+    "staff", "lead", "principal", "manager", "director", "head", "vp", "vice president",
+    "architect", "distinguished", "fellow", "chief", "iv",
+    "intern", "internship", "co-op",
+    "sales", "solutions engineer", "support", "recruiter", "recruiting", "data center",
+    "ios", "android",
+]
+# These reject the title unless the posting clearly asks for <= max_years_required years
+# (some companies call 3-4 year roles "Senior").
+exclude_unless_years_fit = ["senior", "sr", "iii"]
+
+[filters.location]
+# On-site / hybrid jobs pass only if their location mentions one of these. ["*"] = any.
+onsite = [
+    "india", "bengaluru", "bangalore", "hyderabad", "pune", "mumbai", "navi mumbai", "delhi",
+    "new delhi", "ncr", "gurgaon", "gurugram", "noida", "chennai", "kolkata", "ahmedabad", "kochi",
+    "jaipur", "indore", "chandigarh", "coimbatore", "thiruvananthapuram", "trivandrum", "mysore",
+    "mysuru", "bhubaneswar", "nagpur", "vadodara", "surat", "lucknow", "visakhapatnam",
+]
+# Accept remote jobs at all?
+remote = true
+# Region-locked remote jobs ("Remote - US") pass only if they mention one of these. ["*"] = any.
+remote_regions = ["*"]
+
+[ranking]
+# Title boosts: AI roles first, then full-stack / backend.
+title_top = [
+    "ai", "ml", "machine learning", "llm", "llms", "genai", "generative ai", "applied ai",
+    "deep learning", "nlp", "agent", "agents", "agentic", "mle",
+]
+title_next = ["full stack", "fullstack", "full-stack", "backend", "back-end", "back end"]
+remote_bonus = 10               # added to every remote job's score (rule or AI)
+stale_after_days = 90           # postings older than this...
+stale_penalty = 10              # ...lose this many points (old listings rarely respond)
+
+[fetch]
+workers = 8                     # boards fetched at once per source (Workday 12, Workable 2 by default)
+# Also fetch the thousands of company boards in companies/<ats>.tsv (filled by `harvest`).
+registry = true
+# Sources that only show recent postings (HN, Remotive, RemoteOK, JSearch, Adzuna) can't tell us
+# when a job closes, so their jobs are hidden after this many days.
+max_age_days = 30
+# Very large Workday boards are fetched newest-first and only partly; their jobs that haven't
+# been listed for this many days count as closed.
+unseen_days = 7
+
+# --- Sources ------------------------------------------------------------------------------
+# Company boards: slug = "Display name". The slug is the part of the careers URL:
+#   boards.greenhouse.io/<slug>, jobs.lever.co/<slug>, jobs.ashbyhq.com/<slug>,
+#   jobs.smartrecruiters.com/<slug>, <tenant>.<wdN>.myworkdayjobs.com/<site> -> "<tenant>/<wdN>/<site>"
+# Most companies live in companies/<ats>.tsv instead (run `python -m justjob harvest`);
+# boards listed here are always fetched too, and the names given here win.
+
+[sources.greenhouse]
+enabled = true
+
+[sources.greenhouse.boards]
+# AI companies
+anthropic = "Anthropic"
+xai = "xAI"
+scaleai = "Scale AI"
+databricks = "Databricks"
+togetherai = "Together AI"
+coreweave = "CoreWeave"
+figureai = "Figure AI"
+gleanwork = "Glean"
+snorkelai = "Snorkel AI"
+cresta = "Cresta"
+assemblyai = "AssemblyAI"
+stabilityai = "Stability AI"
+inflectionai = "Inflection AI"
+imbue = "Imbue"
+labelbox = "Labelbox"
+observeai = "Observe.AI"
+typeface = "Typeface"
+descript = "Descript"
+lightningai = "Lightning AI"
+waymo = "Waymo"
+nuro = "Nuro"
+# Strong India presence
+okta = "Okta"
+zscaler = "Zscaler"
+inmobi = "InMobi"
+highradius = "HighRadius"
+rubrik = "Rubrik"
+sigmoid = "Sigmoid"
+hackerrank = "HackerRank"
+glance = "Glance"
+netskope = "Netskope"
+druva = "Druva"
+harnessinc = "Harness"
+newrelic = "New Relic"
+singlestore = "SingleStore"
+yugabyte = "YugabyteDB"
+groww = "Groww"
+# Remote-friendly
+gitlab = "GitLab"
+grafanalabs = "Grafana Labs"
+canonical = "Canonical"
+mozilla = "Mozilla"
+tailscale = "Tailscale"
+launchdarkly = "LaunchDarkly"
+neo4j = "Neo4j"
+jetbrains = "JetBrains"
+storyblok = "Storyblok"
+pagerduty = "PagerDuty"
+wikimedia = "Wikimedia Foundation"
+circleci = "CircleCI"
+algolia = "Algolia"
+cockroachlabs = "Cockroach Labs"
+planetscale = "PlanetScale"
+mattermost = "Mattermost"
+contentful = "Contentful"
+backblaze = "Backblaze"
+fastly = "Fastly"
+# Other tech
+stripe = "Stripe"
+figma = "Figma"
+airbnb = "Airbnb"
+discord = "Discord"
+reddit = "Reddit"
+dropbox = "Dropbox"
+robinhood = "Robinhood"
+coinbase = "Coinbase"
+cloudflare = "Cloudflare"
+datadog = "Datadog"
+mongodb = "MongoDB"
+elastic = "Elastic"
+twilio = "Twilio"
+asana = "Asana"
+instacart = "Instacart"
+lyft = "Lyft"
+pinterest = "Pinterest"
+samsara = "Samsara"
+brex = "Brex"
+gusto = "Gusto"
+airtable = "Airtable"
+vercel = "Vercel"
+mercury = "Mercury"
+fivetran = "Fivetran"
+intercom = "Intercom"
+mixpanel = "Mixpanel"
+jfrog = "JFrog"
+duolingo = "Duolingo"
+coursera = "Coursera"
+khanacademy = "Khan Academy"
+calendly = "Calendly"
+
+[sources.lever]
+enabled = true
+
+[sources.lever.boards]
+paytm = "Paytm"
+meesho = "Meesho"
+cred = "CRED"
+zeta = "Zeta"
+mindtickle = "Mindtickle"
+fampay = "FamPay"
+toptal = "Toptal"
+sonarsource = "SonarSource"
+neon = "Neon"
+zilliz = "Zilliz"
+palantir = "Palantir"
+spotify = "Spotify"
+zoox = "Zoox"
+shieldai = "Shield AI"
+
+# Companies on Lever's EU instance (api.eu.lever.co), same format as above
+[sources.lever.eu_boards]
+
+[sources.ashby]
+enabled = true
+
+[sources.ashby.boards]
+# AI companies
+openai = "OpenAI"
+cohere = "Cohere"
+perplexity = "Perplexity"
+cursor = "Cursor"
+cognition = "Cognition"
+harvey = "Harvey"
+sierra = "Sierra"
+decagon = "Decagon"
+elevenlabs = "ElevenLabs"
+langchain = "LangChain"
+llamaindex = "LlamaIndex"
+modal = "Modal"
+baseten = "Baseten"
+fireworks = "Fireworks AI"
+cerebras = "Cerebras"
+lambda = "Lambda"
+crusoe = "Crusoe"
+runpod = "RunPod"
+anyscale = "Anyscale"
+deepgram = "Deepgram"
+writer = "Writer"
+synthesia = "Synthesia"
+suno = "Suno"
+pika = "Pika"
+runway = "Runway"
+midjourney = "Midjourney"
+ideogram = "Ideogram"
+physicalintelligence = "Physical Intelligence"
+poolside = "Poolside"
+reka = "Reka"
+sarvam = "Sarvam AI"
+abridge = "Abridge"
+ambiencehealthcare = "Ambience Healthcare"
+nomic = "Nomic"
+pinecone = "Pinecone"
+weaviate = "Weaviate"
+unstructured = "Unstructured"
+# Remote-friendly / dev tools
+clickhouse = "ClickHouse"
+vultr = "Vultr"
+render = "Render"
+docker = "Docker"
+clickup = "ClickUp"
+kong = "Kong"
+sanity = "Sanity"
+n8n = "n8n"
+gainsight = "Gainsight"
+snyk = "Snyk"
+prefect = "Prefect"
+astronomer = "Astronomer"
+sentry = "Sentry"
+close = "Close"
+helpscout = "Help Scout"
+railway = "Railway"
+posthog = "PostHog"
+supabase = "Supabase"
+replit = "Replit"
+zapier = "Zapier"
+# Other tech
+notion = "Notion"
+linear = "Linear"
+ramp = "Ramp"
+plaid = "Plaid"
+vanta = "Vanta"
+snowflake = "Snowflake"
+temporal = "Temporal"
+hex = "Hex"
+airbyte = "Airbyte"
+amplitude = "Amplitude"
+gamma = "Gamma"
+warp = "Warp"
+zed = "Zed"
+webflow = "Webflow"
+miro = "Miro"
+
+[sources.smartrecruiters]
+enabled = true
+
+[sources.smartrecruiters.boards]
+swiggy = "Swiggy"
+freshworks = "Freshworks"
+servicenow = "ServiceNow"
+
+[sources.workday]
+# Large employers. Not an official API: the JSON the public career sites load themselves.
+enabled = true
+
+[sources.workday.boards]
+"nvidia/wd5/nvidiaexternalcareersite" = "NVIDIA"
+
+# These ATS sites mostly host smaller companies. Their companies come from `harvest`
+# (companies/<ats>.tsv) and `discover --add` (links that appear in fetched jobs).
+
+[sources.workable]
+enabled = true
+
+[sources.workable.boards]
+huggingface = "Hugging Face"
+zyte = "Zyte"
+apna = "Apna"
+
+[sources.bamboohr]
+enabled = true
+
+[sources.bamboohr.boards]
+
+[sources.breezy]
+enabled = true
+
+[sources.breezy.boards]
+
+[sources.recruitee]
+enabled = true
+
+[sources.recruitee.boards]
+
+[sources.personio]
+enabled = true
+
+[sources.personio.boards]
+
+[sources.teamtailor]
+enabled = true
+
+[sources.teamtailor.boards]
+
+[sources.rippling]
+enabled = true
+
+[sources.rippling.boards]
+
+[sources.gem]
+enabled = true
+
+[sources.gem.boards]
+
+[sources.remotive]
+enabled = true
+categories = ["software-development", "artificial-intelligence", "data", "engineering"]
+
+[sources.remoteok]
+enabled = true
+
+[sources.weworkremotely]
+enabled = true
+categories = [
+    "remote-full-stack-programming-jobs", "remote-back-end-programming-jobs",
+    "remote-front-end-programming-jobs", "remote-programming-jobs",
+]
+
+[sources.himalayas]
+enabled = true
+queries = ["ai engineer", "machine learning engineer", "llm engineer", "full stack engineer", "backend engineer", "python developer"]
+country = ""                    # e.g. "India" = only jobs that can be done from India; "" = all
+
+[sources.jobicy]
+enabled = true
+tags = ["python", "machine learning", "full stack", "backend"]
+
+[sources.workingnomads]
+enabled = true
+
+[sources.hackernews]
+enabled = true                  # latest "Ask HN: Who is hiring?" thread
+
+[sources.jsearch]
+# Google for Jobs (includes many LinkedIn/Indeed/Naukri listings) via RapidAPI.
+# Needs JSEARCH_API_KEY in .env. The free plan is small: each query below = 1 request per run.
+enabled = true
+queries = ["AI engineer", "full stack developer", "backend developer python"]
+country = "in"
+date_posted = "3days"           # all | today | 3days | week | month
+
+[sources.adzuna]
+# Needs ADZUNA_APP_ID and ADZUNA_APP_KEY in .env (free at developer.adzuna.com).
+enabled = true
+country = "in"
+queries = ["ai engineer", "machine learning engineer", "full stack developer", "backend developer"]
+max_days_old = 3
+
+# --- AI step ------------------------------------------------------------------------------
+# Any OpenAI-compatible API works: switch provider by name, or add your own block below.
+
+[ai]
+enabled = true                  # only runs when the provider's API key is set in .env
+provider = "gemini"
+fallback = ["groq"]             # tried in order if the main provider fails or has no key
+batch_size = 10                 # jobs per AI call
+max_calls_per_run = 30          # cap per run; leftovers are analyzed on the next run
+min_interval_seconds = 8        # pause between calls (free tiers have low per-minute limits)
+description_chars = 2500        # each description is trimmed to this before sending
+
+[ai.providers.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-flash-lite-latest"   # fast, generous free tier; `python -m justjob models` lists others
+api_key_env = "GEMINI_API_KEY"
+
+[ai.providers.groq]
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[ai.providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model = "meta-llama/llama-3.3-70b-instruct:free"
+api_key_env = "OPENROUTER_API_KEY"
+
+# --- Output -------------------------------------------------------------------------------
+
+[digest]
+min_score = 0                   # 0 = show every kept job, ranked; raise it to hide weak fits
+max_items = 60
+
+[notify]
+telegram = false                # needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env
+email = false                   # needs SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_TO in .env
+max_items = 15                  # how many new matches to include in the message

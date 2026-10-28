@@ -1,0 +1,6 @@
+.env
+data/
+resume.txt
+__pycache__/
+*.pyc
+companies/*.tmp
