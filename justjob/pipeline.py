@@ -16,6 +16,8 @@ from .text import now_iso
 
 log = logging.getLogger(__name__)
 
+SKIPPED = object()   # what a board returns when its source was rate-limiting us earlier in the run
+
 # Which copy of a duplicated job to keep: direct company boards first, aggregators last.
 SOURCE_RANK = {"greenhouse": 0, "lever": 0, "ashby": 0, "smartrecruiters": 0, "workable": 0, "bamboohr": 0,
                "recruitee": 0, "personio": 0, "workday": 0, "teamtailor": 0, "rippling": 0, "gem": 0,
@@ -46,20 +48,23 @@ def fetch(cfg: dict, db: DB, only: set[str] | None = None) -> dict:
     # thousands of boards on the others. Results are stored here, on the main thread.
     pools: dict[str, ThreadPoolExecutor] = {}
     futures = {}
+
+    def unless_blocked(source: str, fn):
+        # Boards of a source that's rate-limiting us finish at once without a request. (Cancelling
+        # their futures instead would hang as_completed(): cancelled futures never complete.)
+        return lambda c: SKIPPED if source in blocked else fn(c)
+
     try:
         for label, fn in tasks:
             source = label.split(":", 1)[0]
             if source not in pools:
                 pools[source] = ThreadPoolExecutor(concurrency(cfg, source), thread_name_prefix=source)
-            futures[pools[source].submit(fn, ctx)] = label
+            futures[pools[source].submit(unless_blocked(source, fn), ctx)] = label
         for done, fut in enumerate(as_completed(futures), 1):
             label = futures[fut]
             source = label.split(":", 1)[0]
             if done % 1000 == 0:
                 log.info("fetch: %d/%d boards done, %d new jobs so far", done, len(futures), stats["new"])
-            if fut.cancelled():   # its source was rate-limited; tried again next run
-                stats["rate_limited"] += 1
-                continue
             try:
                 res = fut.result()
             except Exception as e:
@@ -71,7 +76,6 @@ def fetch(cfg: dict, db: DB, only: set[str] | None = None) -> dict:
                     per_source[source]["rate_limited"] += 1
                     if source not in blocked and ((e.retry_after or 0) > 600 or per_source[source]["rate_limited"] >= 25):
                         blocked.add(source)
-                        pools[source].shutdown(wait=False, cancel_futures=True)
                         hours = f" for {e.retry_after / 3600:.0f}h" if (e.retry_after or 0) > 3600 else ""
                         log.warning("fetch: %s is rate-limiting us%s; its remaining boards wait for the next run",
                                     source, hours)
@@ -81,6 +85,9 @@ def fetch(cfg: dict, db: DB, only: set[str] | None = None) -> dict:
                 checks.append((label, False, 0, str(e)[:300]))
                 per_source[source]["errors"] += 1
                 stats["errors"] += 1
+                continue
+            if res is SKIPPED:   # its source is rate-limiting us; tried again next run
+                stats["rate_limited"] += 1
                 continue
             listed = set(res.listed_ids if res.listed_ids is not None else [j.id for j in res.jobs])
             checks.append((label, True, len(listed), None))

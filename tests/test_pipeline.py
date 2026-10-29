@@ -79,6 +79,31 @@ class PipelineTests(unittest.TestCase):
         boards = dict(self.db.q("SELECT board, fails FROM boards"))
         self.assertEqual(boards, {"greenhouse:gone": 1})   # 429s aren't held against the boards
 
+    def test_rate_limit_with_boards_still_queued_does_not_hang(self):
+        # One worker, so most of the source's boards are still waiting in the queue when the first
+        # 429 comes back. Stopping the source must not leave futures that never finish.
+        import threading
+        import time
+        from justjob.net import HttpError
+        ran = []
+
+        def limited(i):
+            def fn(ctx):
+                ran.append(i)
+                time.sleep(0.05)
+                raise HttpError(429, "https://apply.workable.com/x", "", retry_after=83000)
+            return fn
+        self.cfg["sources"] = {"workable": {"concurrency": 1}}
+        tasks = [(f"workable:co{i}", limited(i)) for i in range(10)]
+        out = {}
+        with mock.patch.object(pipeline, "build_tasks", return_value=tasks):
+            t = threading.Thread(target=lambda: out.update(pipeline.fetch(self.cfg, self.db)), daemon=True)
+            t.start()
+            t.join(10)
+        self.assertFalse(t.is_alive(), "fetch hung after a source was rate-limited")
+        self.assertEqual(out["rate_limited"], 10)
+        self.assertLessEqual(len(ran), 3)   # the rest were skipped without a request
+
     def test_one_short_rate_limit_does_not_stop_source(self):
         from justjob.net import HttpError
 

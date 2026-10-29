@@ -13,7 +13,9 @@ if ($EveryHours -gt 0) {
     $trigger = New-ScheduledTaskTrigger -Once -At $At -RepetitionInterval (New-TimeSpan -Hours $EveryHours)
 }
 # StartWhenAvailable: if the PC was off at the scheduled time, run as soon as it's back on.
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+# On a laptop, Windows' defaults would skip runs on battery and kill a run when it's unplugged.
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask -TaskName "JustJob" -Action $action -Trigger $trigger -Settings $settings `
     -Description "Job fetch, filter and digest (just-job)" -Force | Out-Null
