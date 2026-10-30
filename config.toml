@@ -396,7 +396,7 @@ enabled = true                  # only runs when the provider's API key is set i
 provider = "gemini"
 fallback = ["groq"]             # tried in order if the main provider fails or has no key
 batch_size = 10                 # jobs per AI call
-max_calls_per_run = 30          # cap per run; leftovers are analyzed on the next run
+max_calls_per_run = 100         # 1,000 jobs per run; leftovers are analyzed on the next run
 min_interval_seconds = 8        # pause between calls (free tiers have low per-minute limits)
 description_chars = 2500        # each description is trimmed to this before sending
 
