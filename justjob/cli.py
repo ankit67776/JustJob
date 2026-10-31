@@ -23,15 +23,16 @@ def setup_logging(verbose: bool) -> None:
     (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
-    console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG if verbose else logging.INFO)
-    console.setFormatter(logging.Formatter("%(message)s"))
     logfile = logging.handlers.RotatingFileHandler(
         DATA_DIR / "logs" / "justjob.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     logfile.setLevel(logging.INFO)
     logfile.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    root.addHandler(console)
     root.addHandler(logfile)
+    if sys.stderr:   # pythonw (the windowless scheduled runs) has no console; the log file is enough
+        console = logging.StreamHandler()
+        console.setLevel(logging.DEBUG if verbose else logging.INFO)
+        console.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(console)
 
 
 def _only(value: str | None) -> set[str] | None:

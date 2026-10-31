@@ -8,6 +8,10 @@ param([string]$At = "9am", [int]$EveryHours = 0, [int]$HotEveryHours = 1)
 
 $project = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python -ErrorAction Stop).Source
+# pythonw runs without a console window: no black window popping up every hour, and nothing to
+# close by accident (closing that window kills the run). Output goes to data\logs\justjob.log.
+$pythonw = Join-Path (Split-Path $python) "pythonw.exe"
+if (Test-Path $pythonw) { $python = $pythonw }
 
 # StartWhenAvailable: if the PC was off at the scheduled time, run as soon as it's back on.
 # On a laptop, Windows' defaults would skip runs on battery and kill a run when it's unplugged.
