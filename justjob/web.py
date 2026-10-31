@@ -1,10 +1,17 @@
 """HTML rendering (shared by the digest file and the dashboard) and the local dashboard server."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+import http.cookies
 import json
 import logging
+import os
 import re
+import secrets
+import threading
+import time
 import urllib.parse
 import webbrowser
 import zlib
@@ -13,6 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from . import registry
 from .db import DB, score_sql, SHOWABLE, STATUSES
@@ -158,6 +166,18 @@ a { color:inherit; }
          border-radius:10px; background:var(--ink); color:#fff; font-size:13.5px; opacity:0; pointer-events:none; transition:opacity .2s; }
 .toast.on { opacity:1; pointer-events:auto; }
 .toast button { background:none; border:0; color:#9FE3CF; font:inherit; font-weight:600; cursor:pointer; padding:2px 4px; }
+
+/* sign-in page */
+.login-page { display:grid; place-items:center; min-height:100vh; padding:16px; }
+.login { width:min(360px, 100%); background:var(--surface); border:1px solid var(--line); border-radius:14px;
+         padding:28px; display:grid; gap:10px; }
+.login .brand { margin-bottom:12px; }
+.login label { font-weight:600; font-size:13.5px; }
+.login input { padding:10px 12px; border:1px solid var(--line); border-radius:9px; font:inherit; color:var(--ink);
+               background:var(--paper); }
+.login input:focus { outline:none; border-color:var(--jade); box-shadow:0 0 0 3px var(--jade-wash); background:var(--surface); }
+.login .btn { padding:10px; font-size:14px; margin-top:6px; }
+.login-error { margin:0; color:#B42318; font-size:13px; }
 
 /* digest file */
 .digest main { max-width:900px; margin:0 auto; padding:22px 28px 60px; }
@@ -620,7 +640,7 @@ def search_hits(db: DB, query: str) -> set[str] | None:
     return {r[0] for r in db.q(f"SELECT id FROM jobs WHERE {SHOWABLE} AND {' AND '.join([one] * len(terms))}", params)}
 
 
-def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int = 0) -> str:
+def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int = 0, sign_out: bool = False) -> str:
     f = f or Filters()
     min_score = int(cfg["digest"].get("min_score", 0))
     preds = f.predicates(search_hits(db, f.q))
@@ -691,6 +711,8 @@ def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int =
     if companies:
         foot += f'<p>Tracking <span class="num">{companies:,}</span> companies</p>'
     foot += f'<p>Last run {e(ago(last_run[0][0])) if last_run else "never"}</p>'
+    if sign_out:
+        foot += '<p><a href="/logout">Sign out</a></p>'
     foot += ('<p class="keys"><kbd>j</kbd> <kbd>k</kbd> move, <kbd>o</kbd> open, <kbd>a</kbd> applied, '
              '<kbd>h</kbd> hide, <kbd>d</kbd> description, <kbd>←</kbd> <kbd>→</kbd> pages</p>')
     hidden = f'<input type="hidden" name="view" value="{e(f.view)}">' if f.view != "matches" else ""
@@ -750,27 +772,138 @@ def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int =
     )
 
 
+# --- sign-in ---------------------------------------------------------------------------
+
+SESSION_COOKIE = "jj_session"
+SESSION_DAYS = 30
+MAX_FAILURES = 5            # wrong passwords per address...
+FAILURE_WINDOW = 10 * 60    # ...within this many seconds, before sign-in is refused for a while
+
+
+def session_key(password: str, secret: bytes) -> bytes:
+    """Signs session cookies. Mixing in the password signs everyone out when it changes."""
+    return hmac.new(secret, password.encode(), hashlib.sha256).digest()
+
+
+def make_session(key: bytes, now: float | None = None) -> str:
+    expires = int((now if now is not None else time.time()) + SESSION_DAYS * 86400)
+    return f"{expires}.{hmac.new(key, str(expires).encode(), hashlib.sha256).hexdigest()}"
+
+
+def valid_session(key: bytes, value: str, now: float | None = None) -> bool:
+    expires, _, sig = value.partition(".")
+    if not expires.isdigit() or int(expires) < (now if now is not None else time.time()):
+        return False
+    return hmac.compare_digest(sig, hmac.new(key, expires.encode(), hashlib.sha256).hexdigest())
+
+
+def load_secret(path: Path) -> bytes:
+    """A random key kept next to the database, made on first use."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(secrets.token_bytes(32))
+        if os.name != "nt":
+            path.chmod(0o600)
+    return path.read_bytes()
+
+
+def is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def safe_next(url: str) -> str:
+    """Only paths on this site, so the sign-in page can't be used to bounce people elsewhere."""
+    return url if url.startswith("/") and not url.startswith("//") and "\\" not in url else "/"
+
+
+def login_html(error: str = "", next_url: str = "/") -> str:
+    msg = f'<p class="login-error" role="alert">{e(error)}</p>' if error else ""
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to Just Job</title>'
+        f'<style>{CSS}</style></head><body class="login-page">'
+        '<form class="login" method="post" action="/login"><span class="brand">Just Job</span>'
+        '<label for="pw">Password</label>'
+        '<input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>'
+        f'<input type="hidden" name="next" value="{e(safe_next(next_url))}">{msg}'
+        '<button class="btn apply" type="submit">Sign in</button></form></body></html>'
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path = ""
     cfg: dict = {}
     companies = 0
+    password = ""          # DASHBOARD_PASSWORD; empty = no sign-in (fine on your own computer)
+    key = b""
+    failures: dict[str, list[float]] = {}
+    failures_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         log.debug("dashboard: " + fmt, *args)
 
-    def _send(self, code: int, body: str, ctype: str = "text/html; charset=utf-8") -> None:
+    def _send(self, code: int, body: str, ctype: str = "text/html; charset=utf-8", headers: dict | None = None) -> None:
         data = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
+    def _redirect(self, location: str, cookie: str | None = None) -> None:
+        self._send(303, "", "text/plain", {"Location": location, **({"Set-Cookie": cookie} if cookie else {})})
+
+    def _client(self) -> str:
+        # Behind a proxy on this machine (Caddy), the visitor's address is in X-Forwarded-For.
+        peer = self.client_address[0]
+        forwarded = self.headers.get("X-Forwarded-For")
+        return forwarded.split(",")[0].strip() if forwarded and is_loopback(peer) else peer
+
+    def _signed_in(self) -> bool:
+        if not self.password:
+            return True
+        cookie = http.cookies.SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie") or "")
+        except http.cookies.CookieError:
+            return False
+        morsel = cookie.get(SESSION_COOKIE)
+        return bool(morsel) and valid_session(self.key, morsel.value)
+
+    def _allowed(self) -> bool:
+        """Refuses everything when the dashboard is reachable through a proxy without a password."""
+        if not self.password and self.headers.get("X-Forwarded-For"):
+            self._send(403, "Set DASHBOARD_PASSWORD in .env to use the dashboard from another computer.", "text/plain")
+            return False
+        return True
+
+    def _cookie(self, value: str, max_age: int) -> str:
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+        return f"{SESSION_COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}"
+
+    def _form(self) -> dict[str, list[str]]:
+        length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+        return urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+
     def do_GET(self):
+        if not self._allowed():
+            return
         url = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(url.query)
+        if url.path == "/login":
+            if self._signed_in():
+                return self._redirect(safe_next(qs.get("next", ["/"])[0]))
+            return self._send(200, login_html(next_url=qs.get("next", ["/"])[0]))
+        if url.path == "/logout":
+            return self._redirect("/login", self._cookie("", 0))
         if url.path not in ("/", "/description"):
             return self._send(404, "not found", "text/plain")
+        if not self._signed_in():
+            if url.path == "/description":
+                return self._send(401, "Sign in again.", "text/plain")
+            return self._redirect("/login?" + urllib.parse.urlencode({"next": self.path}))
         db = DB(self.db_path)
         try:
             if url.path == "/description":
@@ -778,19 +911,25 @@ class Handler(BaseHTTPRequestHandler):
                 if not row:
                     return self._send(404, "unknown job", "text/plain")
                 return self._send(200, row[0][0], "text/plain; charset=utf-8")
-            self._send(200, dashboard_html(db, self.cfg, Filters.from_query(qs), self.companies))
+            self._send(200, dashboard_html(db, self.cfg, Filters.from_query(qs), self.companies, bool(self.password)))
         finally:
             db.close()
 
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path != "/status":
+        if not self._allowed():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/login":
+            return self._login()
+        if path != "/status":
             return self._send(404, "not found", "text/plain")
         # Only accept requests from this page, not from other sites open in the browser.
         origin = self.headers.get("Origin")
         if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
             return self._send(403, "forbidden", "text/plain")
-        length = int(self.headers.get("Content-Length") or 0)
-        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        if not self._signed_in():
+            return self._send(401, "Sign in again.", "text/plain")
+        form = self._form()
         job_id, status = form.get("id", [""])[0], form.get("status", [""])[0]
         if status not in STATUSES:
             return self._send(400, "bad status", "text/plain")
@@ -801,14 +940,37 @@ class Handler(BaseHTTPRequestHandler):
             db.close()
         self._send(200 if ok else 404, "ok" if ok else "unknown job", "text/plain")
 
+    def _login(self) -> None:
+        form = self._form()
+        next_url = safe_next(form.get("next", ["/"])[0])
+        if not self.password:
+            return self._redirect(next_url)
+        who, now = self._client(), time.time()
+        with self.failures_lock:
+            recent = [t for t in self.failures.get(who, []) if now - t < FAILURE_WINDOW]
+            self.failures[who] = recent
+        if len(recent) >= MAX_FAILURES:
+            return self._send(429, login_html("Too many wrong passwords. Try again in 10 minutes.", next_url))
+        if hmac.compare_digest(form.get("password", [""])[0].encode(), self.password.encode()):
+            with self.failures_lock:
+                self.failures.pop(who, None)
+            return self._redirect(next_url, self._cookie(make_session(self.key), SESSION_DAYS * 86400))
+        with self.failures_lock:
+            self.failures.setdefault(who, []).append(now)
+        time.sleep(1)   # makes guessing slow
+        self._send(401, login_html("Wrong password. Try again.", next_url))
 
-def serve(cfg: dict, db_path: str, port: int, open_browser: bool = True) -> None:
+
+def serve(cfg: dict, db_path: str, port: int, open_browser: bool = True, host: str = "127.0.0.1") -> None:
     Handler.db_path = db_path
     Handler.cfg = cfg
     Handler.companies = sum(len(registry.load(ats)) for ats in ATS)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"Dashboard at {url}  (Ctrl+C to stop)")
+    Handler.password = os.environ.get("DASHBOARD_PASSWORD", "")
+    if Handler.password:
+        Handler.key = session_key(Handler.password, load_secret(Path(db_path).parent / "session.secret"))
+    server = ThreadingHTTPServer((host, port), Handler)
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/"
+    print(f"Dashboard at {url}{' (sign-in required)' if Handler.password else ''}  (Ctrl+C to stop)")
     if open_browser:
         webbrowser.open(url)
     try:

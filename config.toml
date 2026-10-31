@@ -78,6 +78,8 @@ max_age_days = 30
 # Very large Workday boards are fetched newest-first and only partly; their jobs that haven't
 # been listed for this many days count as closed.
 unseen_days = 7
+# `run --hot` (the hourly refresh) fetches companies that produced a match within this many days.
+hot_days = 60
 
 # --- Sources ------------------------------------------------------------------------------
 # Company boards: slug = "Display name". The slug is the part of the careers URL:

@@ -4,15 +4,19 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import os
 import sys
 
 from . import ai, digest, discover, harvest, pipeline, registry, web
 from .config import DATA_DIR, load_config
 from .db import DB, score_sql, SHOWABLE, STATUSES
+from .lock import run_lock
 from .sources import ATS, SOURCES
 from .text import now_iso
 
 DB_PATH = DATA_DIR / "jobs.db"
+LOCK_PATH = DATA_DIR / "run.lock"
+WAIT_FOR_RUN = 45 * 60   # a full run waits this long for an hourly refresh (or another run) to finish
 
 
 def setup_logging(verbose: bool) -> None:
@@ -51,8 +55,14 @@ def _print_rows(rows) -> None:
 
 
 def cmd_run(cfg, db, args):
-    stats = pipeline.run(cfg, db, _only(args.only), use_ai=not args.no_ai, send=not args.no_notify)
-    f, a, d = stats["fetch"], stats["ai"], stats["digest"]
+    # The hourly refresh just skips a turn if a run is going; anything else waits for it.
+    with run_lock(LOCK_PATH, wait=0 if args.hot else WAIT_FOR_RUN) as got:
+        if not got:
+            print("Another run is in progress; skipping this refresh." if args.hot else
+                  "Another run is still going after 45 minutes; not starting a second one.")
+            return
+        stats = pipeline.run(cfg, db, _only(args.only), use_ai=not args.no_ai, send=not args.no_notify, hot=args.hot)
+    f, a, d = stats["fetch"], stats["ai"], stats.get("digest")
     print(f"\nFetched {f['listed']} listings from {f['tasks']} boards/queries: {f['new']} new stored, "
           f"{f['closed']} closed, {f['errors']} errors")
     print(f"Rules on new jobs: {stats['rules']}")
@@ -61,7 +71,8 @@ def cmd_run(cfg, db, args):
         print(f"AI: skipped ({a['skipped']})")
     else:
         print(f"AI: {a['calls']} calls, {a['analyzed']} analyzed, {a['failed']} failed, {a['pending']} still pending")
-    print(f"Digest: {d['new']} new matches, {d['open']} open -> {d['html']}")
+    if d:
+        print(f"Digest: {d['new']} new matches, {d['open']} open -> {d['html']}")
     if stats.get("notify"):
         print(f"Notify: {stats['notify']}")
     if f["error_list"]:
@@ -69,7 +80,10 @@ def cmd_run(cfg, db, args):
 
 
 def cmd_fetch(cfg, db, args):
-    stats = pipeline.fetch(cfg, db, _only(args.only))
+    with run_lock(LOCK_PATH, wait=WAIT_FOR_RUN) as got:
+        if not got:
+            sys.exit("Another run is still going after 45 minutes.")
+        stats = pipeline.fetch(cfg, db, _only(args.only))
     print(f"Fetched {stats['listed']} listings, {stats['new']} new, {stats['errors']} errors")
     print(f"Rules: {pipeline.apply_rules(cfg, db)}")
     print(f"Dedup: {pipeline.dedup(db)}")
@@ -88,7 +102,10 @@ def cmd_analyze(cfg, db, args):
                 " ai_score = NULL, ai_reason = NULL, ai_flags = NULL, ai_model = NULL"
                 " WHERE closed = 0 AND status = 'new'").rowcount
         print(f"Cleared AI results for {n} open jobs")
-    print(f"AI: {ai.run(cfg, db)}")
+    with run_lock(LOCK_PATH, wait=WAIT_FOR_RUN) as got:
+        if not got:
+            sys.exit("Another run is still going after 45 minutes.")
+        print(f"AI: {ai.run(cfg, db)}")
 
 
 def cmd_digest(cfg, db, args):
@@ -199,8 +216,11 @@ def cmd_harvest(cfg, db, args):
 
 
 def cmd_serve(cfg, db, args):
+    if not web.is_loopback(args.host) and not os.environ.get("DASHBOARD_PASSWORD"):
+        sys.exit(f"Set DASHBOARD_PASSWORD in .env before serving on {args.host}: "
+                 "anyone who can reach it could read and change your list.")
     db.close()
-    web.serve(cfg, str(DB_PATH), args.port, open_browser=not args.no_browser)
+    web.serve(cfg, str(DB_PATH), args.port, open_browser=not args.no_browser, host=args.host)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -215,6 +235,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--only", help="comma-separated sources, e.g. greenhouse,ashby")
     p.add_argument("--no-ai", action="store_true")
     p.add_argument("--no-notify", action="store_true")
+    p.add_argument("--hot", action="store_true",
+                   help="quick refresh: only companies with recent matches and the remote boards (no digest)")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("fetch", help="fetch + filter + dedup only")
@@ -262,6 +284,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("serve", help="open the local dashboard")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default="127.0.0.1", help="address to listen on; anything but this computer "
+                                                        "needs DASHBOARD_PASSWORD in .env")
     p.add_argument("--no-browser", action="store_true")
     p.set_defaults(fn=cmd_serve)
 

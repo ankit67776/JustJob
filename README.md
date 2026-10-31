@@ -95,8 +95,9 @@ Without any keys it runs on the free sources with rule-based ranking.
 
 | Command | What it does |
 |---|---|
-| `run` | Full daily pipeline (`--only greenhouse,ashby`, `--no-ai`, `--no-notify`) |
-| `serve` | Local dashboard: Matches / Applied / Hidden |
+| `run` | Full pipeline (`--only greenhouse,ashby`, `--no-ai`, `--no-notify`) |
+| `run --hot` | Quick refresh (~5 min): companies with a match in the last 60 days plus the remote boards |
+| `serve` | Dashboard: Matches / Applied / Hidden. `--host 0.0.0.0` needs `DASHBOARD_PASSWORD` in `.env` |
 | `list`, `mark <id> applied` | The same from the terminal |
 | `refilter` | Re-apply edited filters to stored jobs |
 | `analyze [--redo]` | AI step only; `--redo` re-scores after a profile change |
@@ -105,8 +106,10 @@ Without any keys it runs on the free sources with rule-based ranking.
 | `discover [--add]` | Find company boards linked from fetched jobs (and add them to `companies/`) |
 | `models` | List models your AI key can use |
 
-Schedule on Windows: `powershell -ExecutionPolicy Bypass -File scripts\schedule_windows.ps1 -At 9am -EveryHours 6`
-(or cron on Linux/macOS). Optional Telegram / email digests: see `.env.example`.
+Schedule on Windows (full run every 4 hours, quick refresh every hour):
+`powershell -ExecutionPolicy Bypass -File scripts\schedule_windows.ps1 -At 9am -EveryHours 4`.
+To run it on a server around the clock, with the dashboard behind a password and optional HTTPS,
+see [docs/DEPLOY.md](docs/DEPLOY.md). Optional Telegram / email digests: see `.env.example`.
 
 ## Sources
 

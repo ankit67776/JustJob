@@ -11,12 +11,14 @@ from . import ai, digest, notify
 from .db import DB
 from .filters import Rules
 from .net import HttpError
-from .sources import SOURCES, FetchContext, build_tasks, concurrency, non_snapshot_sources
+from .sources import ATS, SOURCES, FetchContext, build_tasks, concurrency, non_snapshot_sources
 from .text import now_iso
 
 log = logging.getLogger(__name__)
 
 SKIPPED = object()   # what a board returns when its source was rate-limiting us earlier in the run
+# Job APIs with small monthly quotas: queried on full runs only, never by the hourly refresh.
+QUOTA_SOURCES = {"jsearch", "adzuna"}
 
 # Which copy of a duplicated job to keep: direct company boards first, aggregators last.
 SOURCE_RANK = {"greenhouse": 0, "lever": 0, "ashby": 0, "smartrecruiters": 0, "workable": 0, "bamboohr": 0,
@@ -25,7 +27,28 @@ SOURCE_RANK = {"greenhouse": 0, "lever": 0, "ashby": 0, "smartrecruiters": 0, "w
                "himalayas": 2, "jobicy": 2, "workingnomads": 2, "hackernews": 3}
 
 
-def fetch(cfg: dict, db: DB, only: set[str] | None = None) -> dict:
+def hot_tasks(cfg: dict, db: DB, tasks: list) -> list:
+    """The hourly refresh: company boards that produced a match in the last `fetch.hot_days`,
+    boards picked by hand in config.toml, and the remote job boards (a request or two each).
+
+    Sources with a daily request budget (Workable's `max_boards`) are left to the full runs:
+    hourly visits on top would use the budget up and get us blocked for a day."""
+    since = datetime.now(timezone.utc) - timedelta(days=int(cfg["fetch"].get("hot_days", 60)))
+    active = db.active_boards(since.isoformat(timespec="seconds"))
+    picked = {f"{ats}:{slug}" for ats in ATS for key, boards in cfg["sources"].get(ats, {}).items()
+              if key.endswith("boards") and isinstance(boards, dict) for slug in boards}
+    out = []
+    for label, fn in tasks:
+        source = label.split(":", 1)[0]
+        budgeted = cfg["sources"].get(source, {}).get("max_boards") or getattr(SOURCES.get(source), "MAX_BOARDS", 0)
+        if budgeted:
+            continue
+        if (label in active or label in picked) if source in ATS else source not in QUOTA_SOURCES:
+            out.append((label, fn))
+    return out
+
+
+def fetch(cfg: dict, db: DB, only: set[str] | None = None, hot: bool = False) -> dict:
     rules = Rules(cfg)
     known = db.known_ids()
     title_ok = lambda title: rules.title_ok(title)[0]   # noqa: E731
@@ -34,6 +57,8 @@ def fetch(cfg: dict, db: DB, only: set[str] | None = None) -> dict:
     ctx = FetchContext(wants=lambda job: job.id not in known and title_ok(job.title), search=search)
     now = now_iso()
     tasks = build_tasks(cfg, only)
+    if hot:
+        tasks = hot_tasks(cfg, db, tasks)
     resting = db.boards_backing_off(datetime.fromisoformat(now))
     skipped = sum(1 for label, _ in tasks if label in resting)
     tasks = rotate(cfg, db, [t for t in tasks if t[0] not in resting])
@@ -204,21 +229,25 @@ def dedup(db: DB) -> dict:
     return {"groups": len(groups), "duplicates": dupes}
 
 
-def run(cfg: dict, db: DB, only: set[str] | None = None, use_ai: bool = True, send: bool = True) -> dict:
+def run(cfg: dict, db: DB, only: set[str] | None = None, use_ai: bool = True, send: bool = True,
+        hot: bool = False) -> dict:
     started = now_iso()
     with db.conn:
         run_id = db.conn.execute("INSERT INTO runs (started_at) VALUES (?)", (started,)).lastrowid
 
-    stats: dict = {"fetch": fetch(cfg, db, only)}
+    stats: dict = {"hot": hot, "fetch": fetch(cfg, db, only, hot)}
     stats["rules"] = apply_rules(cfg, db)
     stats["dedup"] = dedup(db)
     stats["ai"] = ai.run(cfg, db) if use_ai else {"skipped": "--no-ai"}
-    d = digest.build(cfg, db)
-    stats["digest"] = digest.write(cfg, d)
-    if send:
-        stats["notify"] = notify.send(cfg, d)
-    db.set_meta("previous_digest_at", d.since or "")   # the dashboard tags jobs newer than this
-    db.set_meta("last_digest_at", d.generated_at)
+    # The digest and notifications come with the full runs only, so "new since the last digest"
+    # (and the dashboard's New tag) covers a few hours, not just the last hourly refresh.
+    if not hot:
+        d = digest.build(cfg, db)
+        stats["digest"] = digest.write(cfg, d)
+        if send:
+            stats["notify"] = notify.send(cfg, d)
+        db.set_meta("previous_digest_at", d.since or "")   # the dashboard tags jobs newer than this
+        db.set_meta("last_digest_at", d.generated_at)
 
     with db.conn:
         db.conn.execute("UPDATE runs SET finished_at = ?, stats = ? WHERE id = ?",

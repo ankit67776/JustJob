@@ -193,6 +193,11 @@ class DB:
                 out.add(board)
         return out
 
+    def active_boards(self, since: str) -> set[str]:
+        """Boards that produced a job the rules kept, first seen since `since`."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT board FROM jobs WHERE rule_status IN ('pass', 'unclear') AND first_seen >= ?", (since,))}
+
     def board_checked_at(self) -> dict[str, str]:
         return dict(self.conn.execute("SELECT board, checked_at FROM boards").fetchall())
 
