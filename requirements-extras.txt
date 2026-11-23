@@ -1,0 +1,4 @@
+# Optional. The pipeline and the dashboard run on the standard library alone.
+#   pip install -r requirements-extras.txt
+pypdf>=6.0         # reads PDF resumes on the Profile page (DOCX and TXT work without it)
+playwright>=1.50   # the apply agent drives your installed Edge or Chrome; no browser download needed

@@ -34,7 +34,7 @@ def load_config(path: Path | None = None) -> dict:
     load_env(ROOT / ".env")
     with open(path or ROOT / "config.toml", "rb") as f:
         cfg = tomllib.load(f)
-    for section in ("profile", "filters", "ranking", "fetch", "sources", "ai", "digest", "notify"):
+    for section in ("profile", "filters", "ranking", "fetch", "sources", "ai", "digest", "notify", "apply"):
         cfg.setdefault(section, {})
     cfg["filters"].setdefault("title", {})
     cfg["filters"].setdefault("location", {})
@@ -42,10 +42,9 @@ def load_config(path: Path | None = None) -> dict:
 
 
 def resume_text(cfg: dict, limit: int = 4000) -> str:
-    name = cfg["profile"].get("resume_file")
-    if not name:
-        return ""
-    path = ROOT / name
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace").strip()[:limit]
+    """The resume uploaded on the Profile page, else the plain-text file config.toml names."""
+    text = cfg.get("profile", {}).get("resume_text") or ""
+    name = cfg.get("profile", {}).get("resume_file")
+    if not text and name and (ROOT / name).exists():
+        text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+    return text.strip()[:limit]

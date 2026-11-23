@@ -1,7 +1,7 @@
 """Dashboard filters, facet counts and sorting."""
 import re
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 from justjob import pipeline, web
@@ -12,7 +12,7 @@ from .helpers import make_cfg
 
 
 def days_ago(n):
-    return (datetime.now(timezone.utc) - timedelta(days=n)).isoformat(timespec="seconds")
+    return (datetime.now(UTC) - timedelta(days=n)).isoformat(timespec="seconds")
 
 
 class DashboardTests(unittest.TestCase):
@@ -105,6 +105,16 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('class="posted fresh" title="Posted', page)
         self.assertIn('<span class="skill">python</span>', page)
         self.assertIn("Experience not stated", page)
+
+    def test_applied_tab_keeps_closed_postings(self):
+        self.db.set_status("greenhouse:1", "applied", days_ago(2))
+        with self.db.conn:
+            self.db.conn.execute("UPDATE jobs SET closed = 1 WHERE id = 'greenhouse:1'")
+        page = self.page(view="applied")
+        self.assertIn('data-id="greenhouse:1"', page)
+        self.assertIn("Applied 2d ago", page)
+        self.assertIn("Posting closed", page)
+        self.assertNotIn('data-id="greenhouse:1"', self.page())   # gone from Matches
 
     def test_role_groups(self):
         for title, role in [("Senior LLM Engineer", "ai"), ("Full-Stack Developer", "fullstack"),

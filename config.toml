@@ -2,7 +2,8 @@
 # After editing filters, run `python -m justjob refilter` to re-apply them to stored jobs.
 
 [profile]
-# Used by the filters, the rule-based ranking and the AI prompt. Edit freely.
+# Seeds the dashboard's Profile page. Once you save that page, its values win: edit them there.
+# Used by the filters, the rule-based ranking and the AI prompt.
 summary = "Full-stack / AI engineer with 3+ years of experience: Python, ML and LLM apps (RAG, agents), backend APIs and React frontends."
 years_experience = 3.3
 max_years_required = 4          # jobs that clearly require more than this are dropped
@@ -416,6 +417,15 @@ api_key_env = "GROQ_API_KEY"
 base_url = "https://openrouter.ai/api/v1"
 model = "meta-llama/llama-3.3-70b-instruct:free"
 api_key_env = "OPENROUTER_API_KEY"
+
+# --- Apply agent --------------------------------------------------------------------------
+# Fills Greenhouse and Ashby forms in a browser window and waits for you to press Submit.
+# Needs the extras: pip install -r requirements-extras.txt
+
+[apply]
+browser = "msedge"              # "msedge" or "chrome": an installed browser; it gets its own profile in data/browser
+max_per_day = 25                # applications sent through the agent per day
+wait_minutes = 45               # how long it waits for you to press Submit before giving up
 
 # --- Output -------------------------------------------------------------------------------
 

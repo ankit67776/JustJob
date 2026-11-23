@@ -113,7 +113,7 @@ def build_messages(cfg: dict, batch: list) -> list[dict]:
 
 # --- response parsing --------------------------------------------------------------------
 
-def _extract_json(text: str):
+def extract_json(text: str):
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if fence:
@@ -152,7 +152,7 @@ def _as_float(v) -> float | None:
 
 def parse_results(text: str, expected: set[str], max_years: float) -> dict[str, dict]:
     """Validated results keyed by job_id. Raises ValueError if the response isn't usable JSON."""
-    data = _extract_json(text)
+    data = extract_json(text)
     items = data.get("results", data.get("jobs")) if isinstance(data, dict) else data
     if not isinstance(items, list):
         raise ValueError("response has no results list")

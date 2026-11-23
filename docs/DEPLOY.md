@@ -39,10 +39,10 @@ In PowerShell on your computer, from the project folder:
 ssh ubuntu@SERVER_IP "mkdir -p ~/JustJob/data"
 scp .env ubuntu@SERVER_IP:~/JustJob/
 scp data\jobs.db ubuntu@SERVER_IP:~/JustJob/data/
-scp resume.txt ubuntu@SERVER_IP:~/JustJob/          # only if you use one
+scp -r data\resume ubuntu@SERVER_IP:~/JustJob/data/   # the resume uploaded on the Profile page
 ```
 
-This keeps your matches, AI scores and Applied / Hidden lists. Skip `jobs.db` to start empty.
+This keeps your matches, AI scores, profile and Applied / Hidden lists. Skip `jobs.db` to start empty.
 
 ## 4. Set a dashboard password
 
@@ -63,7 +63,7 @@ With a domain, it's served over HTTPS. A free one works: sign in at duckdns.org,
 cd ~/JustJob && DOMAIN=yourname.duckdns.org bash scripts/setup_linux.sh
 ```
 
-Start the first run right away instead of waiting for the timer (about 40 minutes):
+Start the first run right away instead of waiting for the timer (it takes about an hour):
 
 ```bash
 sudo systemctl start justjob-run
@@ -74,6 +74,9 @@ sudo systemctl start justjob-run
 - With a domain: `https://yourname.duckdns.org`, then sign in.
 - Without: on your computer run `ssh -L 8765:127.0.0.1:8765 ubuntu@SERVER_IP`, keep it open, and
   go to http://127.0.0.1:8765.
+
+The apply agent opens a visible browser window, so use it from the dashboard on your own computer
+rather than on the server.
 
 ## 7. Stop the runs on your computer
 

@@ -5,10 +5,10 @@ import json
 import logging
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from . import ai, digest, notify
-from .db import DB
+from .db import DB, REFILTER_PENDING
 from .filters import Rules
 from .net import HttpError
 from .sources import ATS, SOURCES, FetchContext, build_tasks, concurrency, non_snapshot_sources
@@ -33,7 +33,7 @@ def hot_tasks(cfg: dict, db: DB, tasks: list) -> list:
 
     Sources with a daily request budget (Workable's `max_boards`) are left to the full runs:
     hourly visits on top would use the budget up and get us blocked for a day."""
-    since = datetime.now(timezone.utc) - timedelta(days=int(cfg["fetch"].get("hot_days", 60)))
+    since = datetime.now(UTC) - timedelta(days=int(cfg["fetch"].get("hot_days", 60)))
     active = db.active_boards(since.isoformat(timespec="seconds"))
     picked = {f"{ats}:{slug}" for ats in ATS for key, boards in cfg["sources"].get(ats, {}).items()
               if key.endswith("boards") and isinstance(boards, dict) for slug in boards}
@@ -144,7 +144,7 @@ def fetch(cfg: dict, db: DB, only: set[str] | None = None, hot: bool = False) ->
             pool.shutdown(wait=False, cancel_futures=True)
         db.save_board_checks(checks, now)
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(cfg["fetch"].get("max_age_days", 30))))
+    cutoff = (datetime.now(UTC) - timedelta(days=int(cfg["fetch"].get("max_age_days", 30))))
     stats["expired"] = db.expire(non_snapshot_sources(), cutoff.isoformat(timespec="seconds"))
     failing = {s: c["errors"] for s, c in per_source.items() if c["errors"]}
     log.info("fetch: %d tasks (%d failing boards resting), %d listed, %d new, %d closed, %d errors %s%s",
@@ -186,6 +186,13 @@ def apply_rules(cfg: dict, db: DB, everything: bool = False) -> dict:
     db.save_rule_results(results)
     log.info("rules: %d jobs -> %s", len(rows), dict(counts))
     return dict(counts)
+
+
+def refilter(cfg: dict, db: DB) -> dict:
+    """Re-apply the rules to every open job (after the profile or config changed) and dedup again."""
+    stats = {"rules": apply_rules(cfg, db, everything=True), "dedup": dedup(db)}
+    db.set_meta(REFILTER_PENDING, "")
+    return stats
 
 
 def dedup(db: DB) -> dict:
@@ -236,8 +243,11 @@ def run(cfg: dict, db: DB, only: set[str] | None = None, use_ai: bool = True, se
         run_id = db.conn.execute("INSERT INTO runs (started_at) VALUES (?)", (started,)).lastrowid
 
     stats: dict = {"hot": hot, "fetch": fetch(cfg, db, only, hot)}
-    stats["rules"] = apply_rules(cfg, db)
-    stats["dedup"] = dedup(db)
+    if db.get_meta(REFILTER_PENDING):   # the Profile page changed what the rules check
+        stats.update(refilter(cfg, db))
+    else:
+        stats["rules"] = apply_rules(cfg, db)
+        stats["dedup"] = dedup(db)
     stats["ai"] = ai.run(cfg, db) if use_ai else {"skipped": "--no-ai"}
     # The digest and notifications come with the full runs only, so "new since the last digest"
     # (and the dashboard's New tag) covers a few hours, not just the last hourly refresh.

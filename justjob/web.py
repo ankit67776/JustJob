@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import html
 import http.cookies
 import json
 import logging
@@ -16,198 +15,23 @@ import urllib.parse
 import webbrowser
 import zlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import registry
-from .db import DB, score_sql, SHOWABLE, STATUSES
+from . import ai, apply_page, profile, profile_page, registry
+from .apply import agent as apply_agent
+from .apply import browser as apply_browser
+from .apply.forms import FormError
+from .apply.forms import target as apply_target
+from .db import DB, REFILTER_PENDING, SHOWABLE, STATUSES, score_sql
 from .sources import ATS, DISPLAY, source_label
 from .text import now_iso
+from .ui import CSS, e, top_bar
 
 log = logging.getLogger(__name__)
-
-CSS = """
-:root {
-  --paper:#F3F5F4; --surface:#FFFFFF; --ink:#17201D; --muted:#5E6A66; --faint:#8B9692;
-  --line:#DCE2DF; --line-soft:#E9EDEB; --hover:#F8FAF9;
-  --jade:#0E7A61; --jade-ink:#0A5C49; --jade-wash:#E2F0EB; --amber:#A86600; --amber-wash:#FBF0DD;
-  --num:"Bahnschrift","DIN Alternate","DIN 2014","Barlow",system-ui,sans-serif;
-  --text:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
-}
-* { box-sizing:border-box; }
-html { scroll-padding-top:90px; }
-body { margin:0; background:var(--paper); color:var(--ink); font:14px/1.5 var(--text); -webkit-font-smoothing:antialiased; }
-a { color:inherit; }
-:focus-visible { outline:2px solid var(--jade); outline-offset:2px; border-radius:4px; }
-.num, .n, .count { font-family:var(--num); font-variant-numeric:tabular-nums; }
-
-/* top bar */
-.top { position:sticky; top:0; z-index:10; background:var(--surface); border-bottom:1px solid var(--line);
-       display:grid; grid-template-columns:240px minmax(0,1fr) auto; gap:28px; align-items:center; padding:10px 28px; }
-.brand { font-family:var(--num); font-size:19px; font-weight:600; text-decoration:none; display:flex; align-items:center; gap:10px; }
-.brand::before { content:""; width:12px; height:12px; border-radius:3px; background:var(--jade); }
-.search { position:relative; max-width:560px; }
-.search svg { position:absolute; left:12px; top:50%; translate:0 -50%; color:var(--faint); pointer-events:none; }
-.search input { width:100%; padding:9px 40px 9px 36px; border:1px solid var(--line); border-radius:9px; background:var(--paper);
-                font:inherit; color:var(--ink); }
-.search input:focus { background:var(--surface); border-color:var(--jade); outline:none; box-shadow:0 0 0 3px var(--jade-wash); }
-.search kbd { position:absolute; right:10px; top:50%; translate:0 -50%; font:12px var(--num); color:var(--faint);
-              border:1px solid var(--line); border-radius:5px; padding:0 6px; background:var(--surface); }
-.tabs { display:flex; gap:2px; padding:3px; background:var(--paper); border-radius:9px; }
-.tabs a { padding:6px 12px; border-radius:7px; color:var(--muted); text-decoration:none; white-space:nowrap; }
-.tabs a .n { margin-left:6px; color:var(--faint); }
-.tabs a.on { background:var(--surface); color:var(--ink); font-weight:600; box-shadow:0 0 0 1px var(--line); }
-.tabs a.on .n { color:var(--jade); }
-.top .filters-btn { display:none; }
-.top > *, .layout > *, .row > * { min-width:0; }   /* let grid columns shrink on small screens */
-
-/* layout */
-.layout { display:grid; grid-template-columns:240px minmax(0,1fr); gap:28px; max-width:1280px; margin:0 auto; padding:22px 28px 80px; }
-.rail { position:sticky; top:78px; align-self:start; max-height:calc(100vh - 96px); overflow:auto; padding-right:6px; }
-.facet { border:0; margin:0; padding:0 0 14px; }
-.facet + .facet { border-top:1px solid var(--line); padding-top:14px; }
-.facet legend { float:left; width:100%; padding:0; margin-bottom:6px; font-weight:600; font-size:13.5px; }
-.facet legend + * { clear:both; }
-.opt { display:flex; align-items:center; gap:10px; padding:5px 8px; margin:0 -8px; border-radius:7px; cursor:pointer; }
-.opt:hover { background:var(--surface); }
-.opt input { accent-color:var(--jade); width:15px; height:15px; margin:0; flex:none; }
-.opt .n { margin-left:auto; font-size:12.5px; color:var(--faint); }
-.opt.zero { color:var(--faint); }
-.opt:has(input:checked) { color:var(--jade-ink); font-weight:600; }
-.opt:has(input:checked) .n { color:var(--jade); }
-.facet details summary { cursor:pointer; color:var(--muted); font-size:13px; padding:4px 0; list-style:none; }
-.facet details summary::-webkit-details-marker { display:none; }
-.facet details[open] summary { display:none; }
-.rail-foot { margin-top:18px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; }
-.rail-foot p { margin:0 0 6px; }
-.rail-foot .num { color:var(--ink); font-size:14px; }
-.keys { color:var(--faint); }
-.keys kbd { font:11.5px var(--num); border:1px solid var(--line); border-radius:4px; padding:0 4px; background:var(--surface); color:var(--muted); }
-
-/* results */
-.results-head { display:flex; align-items:flex-end; gap:16px; margin:2px 0 12px; }
-.results-head .count { font-size:32px; font-weight:600; line-height:1; }
-.results-head .what { color:var(--muted); padding-bottom:3px; }
-.head-tools { margin-left:auto; display:flex; align-items:center; gap:8px; }
-.head-tools .range { color:var(--muted); font:13px var(--num); font-variant-numeric:tabular-nums; margin-right:4px; white-space:nowrap; }
-.head-tools .mini { display:inline-grid; place-items:center; width:30px; height:32px; border-radius:7px; text-decoration:none;
-                    color:var(--ink); border:1px solid var(--line); background:var(--surface); }
-.head-tools .mini.off { color:var(--line); }
-.results-head select { padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface);
-                       font:inherit; color:var(--ink); }
-.chips { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 14px; }
-.chip { display:inline-flex; align-items:center; gap:6px; padding:3px 6px 3px 11px; border-radius:999px; background:var(--jade-wash);
-        color:var(--jade-ink); font-size:12.5px; font-weight:500; text-decoration:none; }
-.chip b { display:grid; place-items:center; width:17px; height:17px; border-radius:50%; font-weight:400; }
-.chip:hover b { background:var(--jade); color:#fff; }
-.chip.clear { background:none; color:var(--muted); text-decoration:underline; text-underline-offset:3px; padding-left:4px; }
-
-.list { background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
-.row { position:relative; display:grid; grid-template-columns:42px minmax(0,1fr) 86px 112px; gap:18px; padding:16px 20px;
-       border-top:1px solid var(--line-soft); transition:opacity .2s, max-height .25s; max-height:800px; }
-.row:first-child { border-top:0; }
-.row:hover { background:var(--hover); }
-.row.cur { background:var(--hover); }
-.row.cur::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--jade); }
-.row.leaving { opacity:0; max-height:0; padding-top:0; padding-bottom:0; overflow:hidden; }
-.mono { width:42px; height:42px; border-radius:10px; display:grid; place-items:center; font:600 15px var(--num);
-        background:hsl(var(--h) 38% 92%); color:hsl(var(--h) 45% 28%); }
-.title { font-size:15.5px; font-weight:600; text-decoration:none; }
-.title:visited { color:var(--muted); }   /* postings you've already opened */
-.title:hover { color:var(--jade-ink); text-decoration:underline; text-underline-offset:3px; }
-.new { display:inline-block; margin-left:8px; padding:0 7px; border-radius:999px; background:var(--jade); color:#fff;
-       font-size:11.5px; font-weight:600; vertical-align:2px; }
-.meta { display:flex; flex-wrap:wrap; gap:2px 14px; margin-top:3px; color:var(--muted); font-size:13px; }
-.meta .company { color:var(--ink); font-weight:500; }
-.meta .remote { color:var(--jade-ink); font-weight:600; }
-.meta .src { color:var(--faint); }
-.why { margin:8px 0 0; color:var(--muted); font-size:13px; max-width:72ch; }
-.skills { display:flex; flex-wrap:wrap; align-items:center; gap:5px; margin-top:8px; font-size:12px; }
-.skills .lead { color:var(--faint); margin-right:2px; }
-.skill { padding:1px 8px; border-radius:999px; border:1px solid var(--line); color:var(--ink); }
-.skills .rest { color:var(--faint); }
-.flag { padding:1px 8px; border-radius:999px; background:var(--amber-wash); color:var(--amber); }
-.desc { margin-top:8px; }
-.desc summary { cursor:pointer; color:var(--muted); font-size:13px; width:max-content; }
-.desc summary:hover { color:var(--ink); }
-.desc pre { white-space:pre-wrap; font:13px/1.6 var(--text); background:var(--paper); border-radius:8px; padding:12px 14px;
-            max-height:440px; overflow:auto; margin:8px 0 0; max-width:80ch; }
-.score { text-align:right; }
-.score .num { display:block; font-size:30px; font-weight:600; line-height:1; }
-.score .bar { display:block; height:3px; margin:9px 0 5px auto; width:56px; border-radius:2px; background:var(--line-soft); overflow:hidden; }
-.score .bar i { display:block; height:100%; background:currentColor; }
-.score .lbl { display:block; font-size:11.5px; color:var(--faint); }
-.hi { color:var(--jade); } .mid { color:var(--amber); } .lo { color:var(--faint); }
-.side { display:flex; flex-direction:column; gap:6px; }
-.posted { font:13px var(--num); color:var(--muted); text-align:right; margin-bottom:2px; }
-.posted.fresh { color:var(--jade); font-weight:600; }
-.btn { display:block; text-align:center; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--surface);
-       color:var(--ink); text-decoration:none; cursor:pointer; font:inherit; font-size:13px; }
-.btn:hover { border-color:var(--faint); }
-.btn.apply { background:var(--jade); border-color:var(--jade); color:#fff; font-weight:600; }
-.btn.apply:hover { background:var(--jade-ink); }
-.minor { display:flex; gap:6px; }
-.minor .btn { flex:1; padding:4px 0; color:var(--muted); }
-.pager { display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:4px; margin:20px 0 6px; }
-.pager a, .pager span { min-width:36px; height:36px; padding:0 10px; display:inline-grid; place-items:center; border-radius:8px;
-                        font:14px var(--num); font-variant-numeric:tabular-nums; text-decoration:none; color:var(--ink); }
-.pager a:hover { background:var(--surface); box-shadow:0 0 0 1px var(--line); }
-.pager .cur { background:var(--ink); color:#fff; font-weight:600; }
-.pager .gap { min-width:18px; padding:0; color:var(--faint); }
-.pager .step { font:14px var(--text); color:var(--muted); }
-.pager .step.off { color:var(--line); }
-.showing { text-align:center; color:var(--faint); font-size:12.5px; }
-.empty { padding:64px 24px; text-align:center; color:var(--muted); }
-.empty strong { display:block; color:var(--ink); font-size:16px; margin-bottom:4px; }
-.toast { position:fixed; left:50%; bottom:24px; translate:-50% 0; display:flex; gap:14px; align-items:center; padding:10px 12px 10px 16px;
-         border-radius:10px; background:var(--ink); color:#fff; font-size:13.5px; opacity:0; pointer-events:none; transition:opacity .2s; }
-.toast.on { opacity:1; pointer-events:auto; }
-.toast button { background:none; border:0; color:#9FE3CF; font:inherit; font-weight:600; cursor:pointer; padding:2px 4px; }
-
-/* sign-in page */
-.login-page { display:grid; place-items:center; min-height:100vh; padding:16px; }
-.login { width:min(360px, 100%); background:var(--surface); border:1px solid var(--line); border-radius:14px;
-         padding:28px; display:grid; gap:10px; }
-.login .brand { margin-bottom:12px; }
-.login label { font-weight:600; font-size:13.5px; }
-.login input { padding:10px 12px; border:1px solid var(--line); border-radius:9px; font:inherit; color:var(--ink);
-               background:var(--paper); }
-.login input:focus { outline:none; border-color:var(--jade); box-shadow:0 0 0 3px var(--jade-wash); background:var(--surface); }
-.login .btn { padding:10px; font-size:14px; margin-top:6px; }
-.login-error { margin:0; color:#B42318; font-size:13px; }
-
-/* digest file */
-.digest main { max-width:900px; margin:0 auto; padding:22px 28px 60px; }
-.digest h2 { font:600 18px var(--num); margin:26px 0 10px; }
-.digest .top { grid-template-columns:1fr; }
-.meta-line { color:var(--muted); }
-
-@media (max-width:960px) {
-  .top { grid-template-columns:1fr auto; gap:12px; padding:10px 16px; }
-  .search { grid-column:1 / -1; grid-row:2; max-width:none; }
-  .tabs { grid-column:1 / -1; grid-row:3; overflow:auto; }
-  .top .filters-btn { display:inline-block; grid-column:2; grid-row:1; }
-  .layout { grid-template-columns:1fr; padding:16px; }
-  .rail { display:none; position:static; max-height:none; background:var(--surface); border:1px solid var(--line);
-          border-radius:12px; padding:14px 16px; }
-  body.show-filters .rail { display:block; }
-  .row { grid-template-columns:38px minmax(0,1fr) 64px; gap:12px; padding:14px; }
-  .side { grid-column:2 / -1; flex-direction:row; align-items:center; flex-wrap:wrap; }
-  .side .apply { flex:1; }
-  .minor { flex:none; }
-  .minor .btn { padding:4px 8px; }
-  .results-head .count { font-size:26px; }
-  .results-head { flex-wrap:wrap; }
-  .head-tools { margin-left:0; width:100%; }
-  .head-tools .range { margin-right:auto; }
-  .posted { text-align:left; margin:0 auto 0 0; }
-  .score .num { font-size:24px; }
-}
-@media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
-"""
 
 JS = """
 const form = document.getElementById('filters');
@@ -282,6 +106,7 @@ document.addEventListener('keydown', (e) => {
   const row = rows()[cur];
   if (!row) return;
   if (e.key === 'o') row.querySelector('.apply').click();
+  if (e.key === 'f') row.querySelector('.autofill')?.click();
   if (e.key === 'a') row.querySelector('[data-status=applied]')?.click();
   if (e.key === 'h') row.querySelector('[data-status=hidden]')?.click();
   if (e.key === 'd') { const d = row.querySelector('details'); if (d) d.open = !d.open; }
@@ -291,8 +116,6 @@ document.addEventListener('keydown', (e) => {
 SEARCH_ICON = ('<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" '
                'stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6" '
                'stroke-linecap="round"/></svg>')
-
-e = html.escape
 
 
 # --- labels shared with the CLI, digest and notifications --------------------------------
@@ -371,6 +194,16 @@ def posted_label(r) -> tuple[str, str, bool]:
     return short, f"{verb} {day}", days <= 3
 
 
+def applied_label(iso: str | None) -> tuple[str, str]:
+    """('Applied 2d ago', 'Applied 6 Nov 2026, 3:18 pm') from the job's status_at."""
+    days = _days_old(iso)
+    if days is None:
+        return "Applied", ""
+    short = "Applied today" if days == 0 else ("Applied yesterday" if days == 1 else f"Applied {days}d ago")
+    when = datetime.fromisoformat(iso).astimezone()
+    return short, f"Applied {when.strftime('%d %b %Y').lstrip('0')}, {when.strftime('%I:%M %p').lstrip('0').lower()}"
+
+
 _JUST_REMOTE = re.compile(r"\s*(?:fully\s+)?remote(?:\s+job)?(?:\s*[-,(]\s*(?:anywhere|worldwide|global)\)?)?\s*", re.I)
 
 
@@ -391,6 +224,8 @@ def render_job(r, interactive: bool, new_since: str | None = None) -> str:
     if r["salary"]:
         meta.append(f"<span>{e(r['salary'])}</span>")
     meta.append(f'<span class="src">via {e(source_label(r["source"], r["board"]))}</span>')
+    if r["closed"]:
+        meta.append('<span class="closed">Posting closed</span>')
 
     detail = ""
     if r["ai_reason"]:
@@ -407,7 +242,13 @@ def render_job(r, interactive: bool, new_since: str | None = None) -> str:
 
     short, full, fresh = posted_label(r)
     side = f'<span class="posted{" fresh" if fresh else ""}" title="{e(full)}">{e(short)}</span>'
+    if r["status"] == "applied":
+        a_short, a_full = applied_label(r["status_at"])
+        side = f'<span class="applied-on" title="{e(a_full)}">{e(a_short)}</span>' + side
     side += f'<a class="btn apply" href="{e(r["url"])}" target="_blank" rel="noopener">Apply</a>'
+    if interactive and apply_target(r):
+        side += (f'<a class="btn autofill" href="/apply?{e(urllib.parse.urlencode({"job": r["id"]}))}" '
+                 'title="Draft answers and fill the form for you (f)">Auto-fill</a>')
     if interactive:
         if r["status"] == "new":
             side += ('<div class="minor"><button class="btn" data-status="applied" title="Mark as applied (a)">Applied</button>'
@@ -509,7 +350,7 @@ class Filters:
     per: int = PAGE
 
     @classmethod
-    def from_query(cls, qs: dict[str, list[str]]) -> "Filters":
+    def from_query(cls, qs: dict[str, list[str]]) -> Filters:
         one = lambda k, default="": (qs.get(k) or [default])[0].strip()   # noqa: E731
         many = lambda k, allowed: tuple(v for v in dict.fromkeys(qs.get(k, [])) if v in allowed)   # noqa: E731
         def number(k: str, default: int) -> int:
@@ -620,14 +461,19 @@ def pager(f: Filters, page: int, pages: int) -> str:
     return f'<nav class="pager" aria-label="Pages">{prev}{"".join(cells)}{nxt}</nav>'
 
 
+# Jobs the dashboard lists: what the rules kept, plus everything you applied to, so the Applied
+# tab stays a full record after a posting closes, gets merged as a duplicate, or new rules reject it.
+LISTED = f"(({SHOWABLE}) OR status = 'applied')"
+
+
 def kept_jobs(db: DB, cfg: dict) -> list[dict]:
-    """Every job the rules kept, with just what filtering, counting and sorting need. One indexed
+    """Every listed job, with just what filtering, counting and sorting need. One indexed
     read; the full rows are loaded only for the jobs on screen."""
     mode = _mode_fn(cfg)
     rows = db.q(
         f"SELECT id, title, location, remote, source, salary != '' AS salary, status, status_at,"
         f" {POSTED_AT} AS posted, {YEARS} AS years, julianday('now') - julianday({POSTED_AT}) AS age,"
-        f" {score_sql(cfg)} AS score FROM jobs WHERE {SHOWABLE}")
+        f" {score_sql(cfg)} AS score FROM jobs WHERE {LISTED}")
     return [{**dict(r), "role": role_of(r["title"]), "mode": mode(r["location"], r["remote"])} for r in rows]
 
 
@@ -637,7 +483,7 @@ def search_hits(db: DB, query: str) -> set[str] | None:
         return None
     one = "(title LIKE ? OR company LIKE ? OR location LIKE ? OR description LIKE ?)"
     params = [f"%{t}%" for t in terms for _ in range(4)]
-    return {r[0] for r in db.q(f"SELECT id FROM jobs WHERE {SHOWABLE} AND {' AND '.join([one] * len(terms))}", params)}
+    return {r[0] for r in db.q(f"SELECT id FROM jobs WHERE {LISTED} AND {' AND '.join([one] * len(terms))}", params)}
 
 
 def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int = 0, sign_out: bool = False) -> str:
@@ -688,12 +534,12 @@ def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int =
     # -- top bar
     tabs = "".join(f'<a class="{"on" if k == f.view else ""}" href="{e(f.url(view=k, page=1))}">{e(lbl)}'
                    f'<span class="n">{tab_n[k]:,}</span></a>' for k, (lbl, _, _) in VIEWS.items())
-    top = (
-        f'<header class="top"><a class="brand" href="/">Just Job</a>'
+    top = top_bar(
+        "jobs",
         f'<div class="search">{SEARCH_ICON}<input id="q" name="q" form="filters" type="search" value="{e(f.q)}" '
-        f'placeholder="Search roles, companies, skills or cities" aria-label="Search"><kbd>/</kbd></div>'
+        f'placeholder="Search roles, companies, skills or cities" aria-label="Search"><kbd>/</kbd></div>',
         f'<nav class="tabs" aria-label="Lists">{tabs}</nav>'
-        f'<button class="btn filters-btn" type="button">Filters</button></header>'
+        f'<button class="btn filters-btn" type="button">Filters</button>',
     )
 
     # -- filter rail
@@ -713,7 +559,7 @@ def dashboard_html(db: DB, cfg: dict, f: Filters | None = None, companies: int =
     foot += f'<p>Last run {e(ago(last_run[0][0])) if last_run else "never"}</p>'
     if sign_out:
         foot += '<p><a href="/logout">Sign out</a></p>'
-    foot += ('<p class="keys"><kbd>j</kbd> <kbd>k</kbd> move, <kbd>o</kbd> open, <kbd>a</kbd> applied, '
+    foot += ('<p class="keys"><kbd>j</kbd> <kbd>k</kbd> move, <kbd>o</kbd> open, <kbd>f</kbd> auto-fill, <kbd>a</kbd> applied, '
              '<kbd>h</kbd> hide, <kbd>d</kbd> description, <kbd>←</kbd> <kbd>→</kbd> pages</p>')
     hidden = f'<input type="hidden" name="view" value="{e(f.view)}">' if f.view != "matches" else ""
     rail = (
@@ -838,12 +684,14 @@ class Handler(BaseHTTPRequestHandler):
     key = b""
     failures: dict[str, list[float]] = {}
     failures_lock = threading.Lock()
+    on_rules_changed: Callable[[], None] | None = None   # starts a re-filter after profile edits
 
     def log_message(self, fmt, *args):
         log.debug("dashboard: " + fmt, *args)
 
-    def _send(self, code: int, body: str, ctype: str = "text/html; charset=utf-8", headers: dict | None = None) -> None:
-        data = body.encode("utf-8")
+    def _send(self, code: int, body: str | bytes, ctype: str = "text/html; charset=utf-8",
+              headers: dict | None = None) -> None:
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -883,9 +731,9 @@ class Handler(BaseHTTPRequestHandler):
         secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
         return f"{SESSION_COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}"
 
-    def _form(self) -> dict[str, list[str]]:
-        length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-        return urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+    def _form(self, limit: int = 10_000, blank: bool = False) -> dict[str, list[str]]:
+        length = min(int(self.headers.get("Content-Length") or 0), limit)
+        return urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=blank)
 
     def do_GET(self):
         if not self._allowed():
@@ -898,14 +746,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, login_html(next_url=qs.get("next", ["/"])[0]))
         if url.path == "/logout":
             return self._redirect("/login", self._cookie("", 0))
-        if url.path not in ("/", "/description"):
+        if url.path not in ("/", "/description", "/profile", "/profile/resume", "/apply", "/apply/status", "/apply/shot"):
             return self._send(404, "not found", "text/plain")
         if not self._signed_in():
-            if url.path == "/description":
+            if url.path in ("/description", "/profile/resume", "/apply/status", "/apply/shot"):
                 return self._send(401, "Sign in again.", "text/plain")
             return self._redirect("/login?" + urllib.parse.urlencode({"next": self.path}))
         db = DB(self.db_path)
         try:
+            if url.path.startswith("/apply"):
+                return self._get_apply(db, url.path, qs.get("job", [""])[0])
+            if url.path == "/profile":
+                prof = profile.load(db, self.cfg)
+                notice = profile_page.notice_for(qs.get("done", [""])[0], qs.get("n", [""])[0])
+                warn = profile_page.warning_for(qs.get("bad", [""])[0].split(","))
+                return self._send(200, profile_page.render(prof, bool(ai.providers(self.cfg)), notice, warn))
+            if url.path == "/profile/resume":
+                path = profile.resume_path(Path(self.db_path).parent, profile.load(db, self.cfg))
+                if not path:
+                    return self._send(404, "No resume uploaded yet.", "text/plain")
+                return self._send(200, path.read_bytes(), RESUME_TYPES[path.suffix],
+                                  {"Content-Disposition": f'inline; filename="resume{path.suffix}"'})
             if url.path == "/description":
                 row = db.q("SELECT description FROM jobs WHERE id = ?", (qs.get("id", [""])[0],))
                 if not row:
@@ -921,7 +782,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/login":
             return self._login()
-        if path != "/status":
+        action = {"/status": self._post_status, "/profile": self._post_profile,
+                  "/profile/resume": self._post_resume, "/profile/parse": self._post_parse,
+                  "/apply/draft": self._post_draft, "/apply/fill": self._post_fill}.get(path)
+        if not action:
             return self._send(404, "not found", "text/plain")
         # Only accept requests from this page, not from other sites open in the browser.
         origin = self.headers.get("Origin")
@@ -929,6 +793,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, "forbidden", "text/plain")
         if not self._signed_in():
             return self._send(401, "Sign in again.", "text/plain")
+        action()
+
+    def _post_status(self) -> None:
         form = self._form()
         job_id, status = form.get("id", [""])[0], form.get("status", [""])[0]
         if status not in STATUSES:
@@ -939,6 +806,115 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._send(200 if ok else 404, "ok" if ok else "unknown job", "text/plain")
+
+    # -- apply agent --------------------------------------------------------------------------
+
+    def _get_apply(self, db: DB, path: str, job_id: str) -> None:
+        job = apply_agent.job_row(db, job_id)
+        if not job:
+            return self._send(404, "Unknown job.", "text/plain")
+        if path == "/apply/status":
+            return self._send(200, json.dumps(apply_agent.status(db, job_id)), "application/json")
+        app = db.get_application(job_id)
+        if path == "/apply/shot":
+            name = (app or {}).get("screenshot") or ""
+            shot = Path(self.db_path).parent / "applications" / name
+            if not name or "/" in name or "\\" in name or not shot.exists():
+                return self._send(404, "No confirmation screenshot.", "text/plain")
+            return self._send(200, shot.read_bytes(), "image/png")
+        prof = profile.load(db, self.cfg)
+        questions, answers = apply_agent.parts(app) if app else ([], {})
+        warns = apply_agent.warnings(db, self.cfg, job, questions, answers, prof) if app else []
+        self._send(200, apply_page.render(job, app, questions, answers, warns, (prof.get("resume") or {}).get("name"),
+                                          apply_browser.LIVE.get(job_id)))
+
+    def _post_draft(self) -> None:
+        job_id = self._form().get("job", [""])[0]
+        if apply_browser.LIVE.get(job_id, {}).get("state") in ("filling", "waiting"):
+            return self._send(409, "This form is open in the browser right now.", "text/plain; charset=utf-8")
+        db = DB(self.db_path)
+        try:
+            apply_agent.draft(db, self.cfg, job_id)
+        except FormError as err:
+            return self._send(400, str(err), "text/plain; charset=utf-8")
+        except Exception as err:   # network trouble, an ATS changing its API, ...
+            log.exception("apply: drafting %s failed", job_id)
+            return self._send(502, f"Couldn't read the form: {str(err)[:200]}", "text/plain; charset=utf-8")
+        finally:
+            db.close()
+        self._send(200, "ok", "text/plain")
+
+    def _post_fill(self) -> None:
+        form = self._form(limit=200_000, blank=True)
+        job_id = form.get("job", [""])[0]
+        db = DB(self.db_path)
+        try:
+            if not db.get_application(job_id):
+                return self._send(400, "Draft the answers first.", "text/plain; charset=utf-8")
+            apply_agent.approve(db, job_id, form)
+            err = apply_agent.fill(db, self.cfg, job_id, self.db_path, Path(self.db_path).parent)
+        finally:
+            db.close()
+        self._send(409 if err else 200, err or "ok", "text/plain; charset=utf-8")
+
+    # -- profile ----------------------------------------------------------------------------
+
+    def _profile_saved(self, db: DB, old: dict, new: dict) -> str:
+        """Make the running server use the new profile; re-filter stored jobs if the rules care."""
+        profile.apply_to_cfg(self.cfg, new)
+        if not profile.rules_changed(old, new):
+            return "saved"
+        db.set_meta(REFILTER_PENDING, "1")
+        if self.on_rules_changed:
+            self.on_rules_changed()
+        return "saved-refilter"
+
+    def _post_profile(self) -> None:
+        form = self._form(limit=100_000, blank=True)
+        db = DB(self.db_path)
+        try:
+            old = profile.load(db, self.cfg)
+            new, bad = profile.from_form(form, old)
+            profile.save(db, new)
+            query = {"done": self._profile_saved(db, old, new), **({"bad": ",".join(bad)} if bad else {})}
+        finally:
+            db.close()
+        self._redirect("/profile?" + urllib.parse.urlencode(query))
+
+    def _post_resume(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > profile.MAX_RESUME_BYTES:
+            return self._send(413, "That file is over 8 MB.", "text/plain; charset=utf-8")
+        data = self.rfile.read(length)
+        name = urllib.parse.unquote(self.headers.get("X-Filename") or "")
+        db = DB(self.db_path)
+        try:
+            old = profile.load(db, self.cfg)
+            new = profile.store_resume(db, self.cfg, Path(self.db_path).parent, name, data)
+            self._profile_saved(db, old, new)
+        except profile.ResumeError as err:
+            return self._send(400, str(err), "text/plain; charset=utf-8")
+        finally:
+            db.close()
+        self._send(200, "ok", "text/plain")
+
+    def _post_parse(self) -> None:
+        db = DB(self.db_path)
+        try:
+            prof = profile.load(db, self.cfg)
+            if not prof.get("resume_text"):
+                return self._send(400, "Upload a resume first.", "text/plain; charset=utf-8")
+            try:
+                facts, model = profile.parse_resume(self.cfg, prof["resume_text"])
+            except profile.ResumeError as err:
+                return self._send(502, str(err), "text/plain; charset=utf-8")
+            old = dict(prof)
+            filled = profile.fill_from_facts(prof, facts, model)
+            profile.save(db, prof)
+            self._profile_saved(db, old, prof)
+        finally:
+            db.close()
+        self._send(200, str(len(filled)), "text/plain")
 
     def _login(self) -> None:
         form = self._form()
@@ -961,9 +937,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(401, login_html("Wrong password. Try again.", next_url))
 
 
-def serve(cfg: dict, db_path: str, port: int, open_browser: bool = True, host: str = "127.0.0.1") -> None:
+RESUME_TYPES = {".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+
+
+def serve(cfg: dict, db_path: str, port: int, open_browser: bool = True, host: str = "127.0.0.1",
+          on_rules_changed: Callable[[], None] | None = None) -> None:
     Handler.db_path = db_path
     Handler.cfg = cfg
+    Handler.on_rules_changed = staticmethod(on_rules_changed) if on_rules_changed else None
     Handler.companies = sum(len(registry.load(ats)) for ats in ATS)
     Handler.password = os.environ.get("DASHBOARD_PASSWORD", "")
     if Handler.password:

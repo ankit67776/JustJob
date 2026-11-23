@@ -6,10 +6,12 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
+import time
 
-from . import ai, digest, discover, harvest, pipeline, registry, web
+from . import ai, digest, discover, harvest, pipeline, profile, registry, web
 from .config import DATA_DIR, load_config
-from .db import DB, score_sql, SHOWABLE, STATUSES
+from .db import DB, REFILTER_PENDING, SHOWABLE, STATUSES, score_sql
 from .lock import run_lock
 from .sources import ATS, SOURCES
 from .text import now_iso
@@ -91,8 +93,9 @@ def cmd_fetch(cfg, db, args):
 
 
 def cmd_refilter(cfg, db, args):
-    print(f"Rules: {pipeline.apply_rules(cfg, db, everything=True)}")
-    print(f"Dedup: {pipeline.dedup(db)}")
+    stats = pipeline.refilter(cfg, db)
+    print(f"Rules: {stats['rules']}")
+    print(f"Dedup: {stats['dedup']}")
 
 
 def cmd_analyze(cfg, db, args):
@@ -129,12 +132,47 @@ def cmd_list(cfg, db, args):
         print("No matches yet. Run: python -m justjob run")
 
 
-def cmd_mark(cfg, db, args):
-    matches = db.q("SELECT id FROM jobs WHERE id = ? OR id LIKE ?", (args.id, f"%{args.id}"))
+def _one_job(db, wanted: str) -> str:
+    matches = db.q("SELECT id FROM jobs WHERE id = ? OR id LIKE ?", (wanted, f"%{wanted}"))
     if len(matches) != 1:
-        sys.exit(f"{len(matches)} jobs match '{args.id}'; use the full id from `list`")
-    db.set_status(matches[0]["id"], args.status, now_iso())
-    print(f"{matches[0]['id']} -> {args.status}")
+        sys.exit(f"{len(matches)} jobs match '{wanted}'; use the full id from `list`")
+    return matches[0]["id"]
+
+
+def cmd_mark(cfg, db, args):
+    job_id = _one_job(db, args.id)
+    db.set_status(job_id, args.status, now_iso())
+    print(f"{job_id} -> {args.status}")
+
+
+def cmd_apply(cfg, db, args):
+    from .apply import agent, browser
+    from .apply.forms import FormError
+
+    job_id = _one_job(db, args.id)
+    try:
+        app = agent.draft(db, cfg, job_id)
+    except FormError as err:
+        sys.exit(str(err))
+    questions, answers = agent.parts(app)
+    for q in questions:
+        a = answers.get(q.id)
+        value = "" if a is None or a.empty else (", ".join(a.value) if isinstance(a.value, list) else str(a.value))
+        flag = "NEEDS YOU" if a and a.needs_you else (a.source if a else "")
+        print(f"{'*' if q.required else ' '} {q.label[:60]:<60} {value[:50]:<50} [{flag}] {a.note[:70] if a else ''}")
+    if not args.fill:
+        print("\nDrafted. Review it at /apply in the dashboard, or rerun with --fill to open the form.")
+        return
+    if err := agent.fill(db, cfg, job_id, str(DB_PATH), DATA_DIR):
+        sys.exit(err)
+    seen = None
+    while browser.busy():
+        live = browser.LIVE.get(job_id, {})
+        if live.get("message") != seen:
+            seen = live.get("message")
+            print(seen)
+        time.sleep(1)
+    print(browser.LIVE.get(job_id, {}).get("message", ""))
 
 
 def cmd_stats(cfg, db, args):
@@ -221,7 +259,24 @@ def cmd_serve(cfg, db, args):
         sys.exit(f"Set DASHBOARD_PASSWORD in .env before serving on {args.host}: "
                  "anyone who can reach it could read and change your list.")
     db.close()
-    web.serve(cfg, str(DB_PATH), args.port, open_browser=not args.no_browser, host=args.host)
+    web.serve(cfg, str(DB_PATH), args.port, open_browser=not args.no_browser, host=args.host,
+              on_rules_changed=lambda: refilter_in_background(cfg))
+
+
+def refilter_in_background(cfg) -> None:
+    """After the Profile page changes your skills or max years: re-check stored jobs now, unless a
+    run holds the lock, in which case that run's next start does it (REFILTER_PENDING in the meta table)."""
+    def work():
+        with run_lock(LOCK_PATH, wait=0) as got:
+            if not got:
+                return
+            db = DB(DB_PATH)
+            try:
+                if db.get_meta(REFILTER_PENDING):
+                    pipeline.refilter(cfg, db)
+            finally:
+                db.close()
+    threading.Thread(target=work, name="refilter", daemon=True).start()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -264,6 +319,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("status", choices=STATUSES)
     p.set_defaults(fn=cmd_mark)
 
+    p = sub.add_parser("apply", help="draft answers for a job's application form (Greenhouse, Ashby)")
+    p.add_argument("id", help="job id (or a unique ending of it)")
+    p.add_argument("--fill", action="store_true", help="then open the form in a browser, fill it, and wait for you to submit")
+    p.set_defaults(fn=cmd_apply)
+
     sub.add_parser("stats", help="counts per source and top rejection reasons").set_defaults(fn=cmd_stats)
 
     p = sub.add_parser("models", help="list models your AI key can use")
@@ -294,6 +354,7 @@ def main(argv: list[str] | None = None) -> None:
     setup_logging(args.verbose)
     cfg = load_config()
     db = DB(DB_PATH)
+    profile.apply_to_cfg(cfg, profile.load(db, cfg))   # the Profile page's values win over config.toml
     try:
         args.fn(cfg, db, args)
     finally:

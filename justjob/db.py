@@ -62,7 +62,37 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT,
     stats       TEXT
 );
+-- Your profile as one JSON document (see profile.py); a single row.
+CREATE TABLE IF NOT EXISTS profile (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    data        TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+-- One row per job the apply agent worked on (see apply/).
+CREATE TABLE IF NOT EXISTS applications (
+    job_id       TEXT PRIMARY KEY,
+    ats          TEXT NOT NULL,
+    apply_url    TEXT NOT NULL,
+    state        TEXT NOT NULL,     -- drafted | filling | waiting | submitted | closed | failed
+    questions    TEXT NOT NULL,     -- JSON: the form's questions, in one schema for every ATS
+    answers      TEXT NOT NULL,     -- JSON: question id -> answer
+    report       TEXT,              -- JSON: what the browser step filled and what it left to you
+    error        TEXT,
+    screenshot   TEXT,              -- file name in data/applications/ of the confirmation page
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    submitted_at TEXT
+);
+-- Answers you approved, reused when another form asks the same question.
+CREATE TABLE IF NOT EXISTS answer_memory (
+    key         TEXT PRIMARY KEY,   -- normalized question label + its options
+    label       TEXT NOT NULL,
+    value       TEXT NOT NULL,      -- JSON
+    uses        INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL
+);
 """
+APP_JSON = ("questions", "answers", "report")
 
 def score_sql(cfg: dict) -> str:
     """The score jobs are ranked by: AI score if available, else the rule score, plus the
@@ -85,6 +115,7 @@ SHOWABLE = (
     "AND COALESCE(ai_within, 1) = 1"
 )
 STATUSES = ("new", "applied", "hidden")
+REFILTER_PENDING = "refilter_pending"   # meta key: set when the profile changes what the rules check
 
 
 class DB:
@@ -111,8 +142,6 @@ class DB:
     def q(self, sql: str, params=()) -> list[sqlite3.Row]:
         return self.conn.execute(sql, params).fetchall()
 
-    # -- meta -----------------------------------------------------------------------------
-
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else default
@@ -120,8 +149,6 @@ class DB:
     def set_meta(self, key: str, value: str) -> None:
         with self.conn:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
-
-    # -- ingest ---------------------------------------------------------------------------
 
     def known_ids(self) -> set[str]:
         return {r[0] for r in self.conn.execute("SELECT id FROM jobs")}
@@ -180,8 +207,6 @@ class DB:
             )
         return cur.rowcount
 
-    # -- board health ---------------------------------------------------------------------
-
     def boards_backing_off(self, now: datetime) -> set[str]:
         """Boards that failed 3+ times in a row and were tried recently. They're retried after
         1, 2, 4, ... days (at most 30), so a removed board stops costing a request every run."""
@@ -217,8 +242,6 @@ class DB:
                 [(b, now, err) for b, ok, _, err in checks if not ok],
             )
 
-    # -- rules / dedup / ai ---------------------------------------------------------------
-
     def save_rule_results(self, results: list[tuple]) -> None:
         """results: (status, reason, exp_years, score, matched_skills_json, id)"""
         with self.conn:
@@ -245,7 +268,52 @@ class DB:
                 "UPDATE jobs SET ai_attempts = ai_attempts + 1 WHERE id = ?", [(i,) for i in ids]
             )
 
-    # -- user actions ---------------------------------------------------------------------
+    def get_profile(self) -> dict | None:
+        row = self.conn.execute("SELECT data FROM profile WHERE id = 1").fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_profile(self, data: dict, now: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO profile (id, data, updated_at) VALUES (1, ?, ?)",
+                              (json.dumps(data, ensure_ascii=False), now))
+
+    def get_application(self, job_id: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM applications WHERE job_id = ?", (job_id,)).fetchone()
+        if not row:
+            return None
+        app = dict(row)
+        for key in APP_JSON:
+            app[key] = json.loads(app[key]) if app[key] else None
+        return app
+
+    def save_application(self, app: dict) -> None:
+        """Insert or replace a whole application row."""
+        row = {k: (json.dumps(v, ensure_ascii=False) if k in APP_JSON and v is not None else v) for k, v in app.items()}
+        cols = ", ".join(row)
+        with self.conn:
+            self.conn.execute(f"INSERT OR REPLACE INTO applications ({cols}) VALUES ({', '.join('?' * len(row))})",
+                              tuple(row.values()))
+
+    def update_application(self, job_id: str, now: str, **fields) -> None:
+        fields["updated_at"] = now
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        values = [json.dumps(v, ensure_ascii=False) if k in APP_JSON and v is not None else v for k, v in fields.items()]
+        with self.conn:
+            self.conn.execute(f"UPDATE applications SET {sets} WHERE job_id = ?", (*values, job_id))
+
+    def submitted_since(self, since: str) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM applications WHERE submitted_at >= ?", (since,)).fetchone()[0]
+
+    def recall_answer(self, key: str):
+        row = self.conn.execute("SELECT value FROM answer_memory WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def remember_answer(self, key: str, label: str, value, now: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO answer_memory (key, label, value, uses, updated_at) VALUES (?, ?, ?, 1, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, uses = uses + 1, updated_at = excluded.updated_at",
+                (key, label, json.dumps(value, ensure_ascii=False), now))
 
     def set_status(self, job_id: str, status: str, now: str) -> bool:
         if status not in STATUSES:
