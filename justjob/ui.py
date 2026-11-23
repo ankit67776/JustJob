@@ -270,6 +270,17 @@ a { color:inherit; }
 .spinner { flex:none; width:22px; height:22px; border-radius:50%; border:3px solid var(--jade-wash); border-top-color:var(--jade);
            animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
+/* answers page */
+.page-head h1 { margin:6px 0 4px; font:600 26px/1.2 var(--num); }
+.page-head p { margin:0 0 16px; color:var(--muted); max-width:72ch; }
+.history { width:100%; border-collapse:collapse; font-size:13.5px; }
+.history th { text-align:left; font-weight:600; color:var(--muted); font-size:12px; padding:6px 10px 6px 0; }
+.history td { padding:8px 10px 8px 0; border-top:1px solid var(--line-soft); vertical-align:top; }
+.history .num { text-align:right; white-space:nowrap; }
+.saved .actions { display:flex; gap:8px; }
+.saved .actions .btn { display:inline-block; padding:5px 14px; }
+.btn.danger { color:#A23B2A; }
+.btn.danger:hover { border-color:#A23B2A; }
 .live { border-left:4px solid var(--jade); }
 .live[data-state="waiting"] { border-left-color:var(--amber); }
 .live[data-state="failed"], .live[data-state="closed"] { border-left-color:var(--faint); }
@@ -323,7 +334,7 @@ a { color:inherit; }
 """
 
 # The dashboard's pages, in top-bar order: (key, label, path).
-PAGES = (("jobs", "Jobs", "/"), ("profile", "Profile", "/profile"))
+PAGES = (("jobs", "Jobs", "/"), ("profile", "Profile", "/profile"), ("answers", "Answers", "/answers"))
 
 
 def top_bar(active: str, middle: str = "", right: str = "") -> str:

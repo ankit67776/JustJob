@@ -426,6 +426,7 @@ api_key_env = "OPENROUTER_API_KEY"
 browser = "msedge"              # "msedge" or "chrome": an installed browser; it gets its own profile in data/browser
 max_per_day = 25                # applications sent through the agent per day
 wait_minutes = 45               # how long it waits for you to press Submit before giving up
+trust_after = 2                 # an answer it learned from you is outlined for checking until you've kept it on this many forms
 
 # --- Output -------------------------------------------------------------------------------
 

@@ -8,7 +8,7 @@ from .. import profile
 from ..db import DB
 from ..text import now_iso
 from . import browser
-from .answers import AUTH_RE, Answer, memory_key, norm, remembers
+from .answers import AUTH_RE, Answer, norm
 from .answers import draft as draft_answers
 from .forms import FormError, Question, fetch_questions, target
 
@@ -51,7 +51,7 @@ def draft(db: DB, cfg: dict, job_id: str) -> dict:
 
 
 def approve(db: DB, job_id: str, form: dict[str, list[str]]) -> dict[str, Answer]:
-    """Saves your edits from the review page and remembers approved choices for other forms."""
+    """Saves your edits from the review page. They're learned for other forms once you submit (memory.py)."""
     app = db.get_application(job_id)
     questions, answers = parts(app)
     now = now_iso()
@@ -67,10 +67,6 @@ def approve(db: DB, job_id: str, form: dict[str, list[str]]) -> dict[str, Answer
         if new != before:
             answers[q.id] = (Answer(new, "you", False, "You edited this.") if new not in ("", [])
                              else Answer(None, "you", q.required, "You cleared this."))
-    for q in questions:
-        a = answers.get(q.id)
-        if a and remembers(q) and not a.empty and (a.source == "you" or (a.source in ("ai", "memory") and not a.needs_you)):
-            db.remember_answer(memory_key(q), q.label, a.value, now)
     db.update_application(job_id, now, answers={k: a.to_dict() for k, a in answers.items()})
     return answers
 
@@ -100,7 +96,7 @@ def fill(db: DB, cfg: dict, job_id: str, db_path: str, data_dir: Path, headless:
     settings = cfg.get("apply", {})
     return browser.start(job_id, t, questions, answers, prof=prof, resume=profile.resume_path(data_dir, prof),
                          db_path=db_path, data_dir=data_dir, browser=settings.get("browser", "msedge"),
-                         wait_minutes=float(settings.get("wait_minutes", 45)), headless=headless)
+                         wait_minutes=float(settings.get("wait_minutes", 45)), headless=headless, job=job)
 
 
 def status(db: DB, job_id: str) -> dict:

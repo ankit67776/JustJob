@@ -83,10 +83,11 @@ public endpoints and drafts each answer from the first source that has it:
 
 - my profile, plus fixed rules for the questions every form asks. Work authorization and sponsorship
   depend on the job's country and the countries I can work in, pay on the job's currency;
-- answers I approved on earlier forms (only choices, since free text tends to name the old company);
+- my own answers from earlier forms, for the same question or one worded almost the same;
 - the LLM, which may only use my profile and resume and has to quote the fact it used. If the quote
   isn't actually in my profile, or the choice isn't one of the form's options, the answer comes back
-  to me.
+  to me. It can also reuse one of my earlier answers for a question that means the same in other
+  words, but it has to name which one, and that answer's value is what goes in.
 
 The review page shows each answer and where it came from, and flags what needs me: drafts of open
 questions, statements I'd be signing (arbitration, certifications) and anything nobody could answer.
@@ -95,6 +96,24 @@ Fill in browser opens the form in Edge or Chrome through Playwright (with its ow
 confirmation page, saves a screenshot and marks the job applied. It never submits on its own, stops
 at a daily cap and warns about duplicate applications. Workday and other sites that need an account
 stay manual.
+
+**The agent learns from me.** While the form is open, the agent keeps reading what each field holds,
+and reads it once more the moment I press Submit (pressed Yes/No buttons, the chosen value of a
+searchable dropdown, ticked boxes, typed text). After a confirmed submission it compares that with
+its own draft:
+
+- Anything I typed, picked or changed is saved. The next form that asks gets it filled in, outlined
+  for me to check until I've kept it on two forms; after that it fills without asking. Changing an
+  answer resets that count.
+- Correcting an answer that came from my profile or a rule makes mine win for that question.
+- Written answers stay drafts, and are flagged when they name the company they were written for.
+- Work authorization and visa answers depend on the job's country, so they aren't saved as answers:
+  "Yes" to "Are you authorized to work in the country where this job is located?" for a job in India
+  adds India to my profile instead. Statements I sign and voluntary disclosures are never saved.
+
+Each application records how many answers went in without an edit from me. The Answers page shows
+that per application, so I can see the agent getting better, and lists every saved answer to edit or
+delete.
 
 ## Design decisions
 
@@ -128,7 +147,7 @@ Without any keys it runs on the free sources with rule-based ranking.
 |---|---|
 | `run` | Full pipeline (`--only greenhouse,ashby`, `--no-ai`, `--no-notify`) |
 | `run --hot` | Quick refresh: companies with a match in the last 60 days, plus the remote boards |
-| `serve` | Dashboard with the Jobs and Profile pages. `--host 0.0.0.0` needs `DASHBOARD_PASSWORD` in `.env` |
+| `serve` | Dashboard with the Jobs, Profile and Answers pages. `--host 0.0.0.0` needs `DASHBOARD_PASSWORD` in `.env` |
 | `list`, `mark <id> applied` | The same from the terminal |
 | `apply <id> [--fill]` | Draft answers for a job's form and print them; `--fill` opens it in the browser |
 | `refilter` | Re-apply edited filters to stored jobs |
@@ -174,10 +193,12 @@ justjob/
   ai.py            batching, prompt, JSON validation, provider fallback
   db.py            SQLite schema and queries
   profile.py       profile fields, resume text extraction, LLM resume parsing
-  apply/           the apply agent: forms.py (form schemas), answers.py (drafting), browser.py (filling)
+  apply/           the apply agent: forms.py (form schemas), answers.py (drafting), browser.py (filling),
+                   memory.py (learning from submitted forms)
   web.py           dashboard server (stdlib http.server) and the Jobs page
   profile_page.py  Profile page
   apply_page.py    apply review page
+  answers_page.py  Answers page: what the agent learned, and how often it needed no edit
   ui.py            shared styles and top bar
   digest.py        Markdown and HTML daily digest
 tests/             unit and end-to-end tests (fake sources, fake LLM server, in-memory DB)

@@ -3,9 +3,10 @@
 Each answer comes from the first of these that knows it:
 1. your profile (name, email, links, notice period, ...) and fixed rules for the questions most
    forms ask (work authorization, sponsorship, relocation, pay, voluntary disclosures),
-2. answers you approved on earlier forms (answer memory; choices only, never free text),
+2. answers you gave on earlier forms (memory.py), for the same question or one worded alike,
 3. an LLM that may use only facts from your profile and resume, and must quote the fact it
    relied on. A quote that isn't actually in your profile or resume sends the answer to you.
+   It may also reuse an earlier answer to a question that means the same, naming which one.
 
 Every answer records where it came from and whether you need to look at it. Free text the LLM
 wrote, statements you sign, and anything nobody could answer always go to you.
@@ -33,6 +34,7 @@ class Answer:
     source: str               # profile | rule | memory | ai | you | none
     needs_you: bool = False
     note: str = ""            # why the agent answered this way, or what you need to do
+    ref: str = ""             # memory answers: the saved answer's key ("~key" when the question only resembles it)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -92,6 +94,38 @@ def pick(options: list[str], wanted) -> str | None:
             return hits[0]
     hits = [o for o in options if _contains(norm(o), w) or _contains(w, norm(o))]
     return hits[0] if len(hits) == 1 else None
+
+
+def fit(q: Question, value):
+    """`value` the way this question takes it (an option, a list of options, or text), or None
+    when the form can't take it."""
+    if value in (None, "", []):
+        return None
+    if q.kind == "multiselect":
+        values = value if isinstance(value, list) else [value]
+        chosen = [c for c in (pick(q.options, v) for v in values) if c] if q.options else [str(v) for v in values]
+        return chosen or None
+    if isinstance(value, list):
+        return None
+    if q.kind in ("select", "boolean"):
+        return pick(q.options or ["Yes", "No"], value)
+    return str(value)
+
+
+def _listed(v) -> list:
+    return v if isinstance(v, list) else [] if v in (None, "") else [v]
+
+
+def same(q: Question, a, b) -> bool:
+    """Whether two answers to `q` say the same thing. Forms reformat what you type: Greenhouse
+    shows '+919876543210' as '+91 98765 43210'."""
+    if isinstance(a, list) or isinstance(b, list):
+        return sorted(map(norm, _listed(a))) == sorted(map(norm, _listed(b)))
+    if q.kind == "phone":
+        return re.sub(r"\D", "", str(a or "")) == re.sub(r"\D", "", str(b or ""))
+    if q.kind == "location":   # a city search box shows the suggestion it took: "Pune, Maharashtra, India"
+        return norm(str(a or "").split(",")[0]) == norm(str(b or "").split(",")[0])
+    return norm(a) == norm(b)
 
 
 def _num(s: str) -> float:
@@ -279,7 +313,7 @@ def rule_answer(q: Question, prof: dict, job: dict) -> Answer | None:
         return _eeo(prof, q) or (ask_you("A voluntary question the agent doesn't recognise.") if q.required
                                  else skip("Voluntary; left empty."))
     if SIGN_RE.search(t):
-        agree = pick(q.options, "Yes") or pick(q.options, "I agree") or pick(q.options, "I acknowledge")
+        agree = next((c for c in (pick(q.options, w) for w in ("Yes", "I agree", "I acknowledge", "Confirmed")) if c), None)
         return ask_you("A statement you sign. Read it and tick it yourself.", agree, "rule")
     if q.kind == "file":
         if qid in ("resume", "_systemfield_resume") or re.search(r"\b(resume|cv)\b", t):
@@ -386,46 +420,24 @@ def rule_answer(q: Question, prof: dict, job: dict) -> Answer | None:
     return None
 
 
-# --- answer memory -----------------------------------------------------------------------
-
-def memory_key(q: Question) -> str:
-    return norm(q.label) + "|" + "|".join(sorted(norm(o) for o in q.options))
-
-
-def remembers(q: Question) -> bool:
-    """Only choices are reused. Free text often names the company it was written for."""
-    return q.group == "custom" and q.kind in CHOICE_KINDS + ("number",)
-
-
-def from_memory(q: Question, db) -> Answer | None:
-    if not remembers(q):
-        return None
-    value = db.recall_answer(memory_key(q))
-    if value in (None, "", []):
-        return None
-    if q.kind == "multiselect":
-        value = [v for v in value if v in q.options] if isinstance(value, list) else []
-        if not value:
-            return None
-    elif q.options and value not in q.options:
-        return None
-    return Answer(value, "memory", note="You gave this answer on an earlier form.")
-
-
 # --- the LLM -----------------------------------------------------------------------------
 
 SYSTEM = """You fill in job application questions for one candidate and return strict JSON.
-Use only the facts under CANDIDATE and RESUME. Never invent employers, titles, dates, numbers, degrees,
-skills, links or experience.
+Use only the facts under CANDIDATE and RESUME, and the candidate's own PAST ANSWERS. Never invent
+employers, titles, dates, numbers, degrees, skills, links or experience.
 
 For every question output:
 {"id": "<id exactly as given>", "value": <answer or null>, "confidence": "high" | "medium" | "low",
- "fact": "<the candidate fact you relied on, copied word for word>" or null, "needs_human": true | false}
+ "fact": "<the candidate fact you relied on, copied word for word>" or null,
+ "past": "<id of the PAST ANSWER you reused>" or null, "needs_human": true | false}
 Return {"answers": [ ... ]} with one object per question and nothing else.
 
 Rules:
 - select and boolean: value must be exactly one of the listed options. multiselect: a list of listed options.
 - number: digits only.
+- PAST ANSWERS are the candidate's own answers on earlier forms. When a question asks the same thing as one
+  of them, even in other words, reuse that answer (mapped to this question's options) and give its id in
+  past. Only when the meaning is the same: a question on a related topic doesn't count.
 - If an honest answer needs information that isn't in the candidate facts, use null and needs_human true.
   Don't guess, and don't assume the candidate lacks something just because it isn't listed.
 - Experience with a specific tool or field: answer from the resume only when it shows that tool or field.
@@ -470,8 +482,10 @@ def resume_block(prof: dict, limit: int = 6000) -> str:
     return "\n".join(out)[:limit]
 
 
-def build_messages(questions: list[Question], prof: dict, job: dict) -> tuple[list[dict], dict[str, Question]]:
+def build_messages(questions: list[Question], prof: dict, job: dict, past: list[dict] = ()
+                   ) -> tuple[list[dict], dict[str, Question], dict[str, dict]]:
     by_local = {f"q{i}": q for i, q in enumerate(questions, 1)}
+    by_past = {f"p{i}": row for i, row in enumerate(past, 1)}
     qs = []
     for local, q in by_local.items():
         line = f"{local} | {q.kind}{' | required' if q.required else ''} | {q.label}"
@@ -480,11 +494,14 @@ def build_messages(questions: list[Question], prof: dict, job: dict) -> tuple[li
         if q.description:
             line += f" | note: {q.description[:200]}"
         qs.append(line)
+    old = "".join(f"\n{pid} | {row['label'][:300]} | {json.dumps(row['value'], ensure_ascii=False)[:400]}"
+                  for pid, row in by_past.items())
     user = (f"CANDIDATE\n{candidate_block(prof)}\n\nRESUME\n{resume_block(prof)}\n\n"
-            f"JOB\n{job.get('title')} at {job.get('company')} ({job.get('location') or 'location n/a'})\n"
+            + (f"PAST ANSWERS (id | question | answer){old}\n\n" if old else "")
+            + f"JOB\n{job.get('title')} at {job.get('company')} ({job.get('location') or 'location n/a'})\n"
             f"{trim_for_ai(job.get('description') or '', 2500)}\n\nQUESTIONS (id | type | label | options)\n"
             + "\n".join(qs))
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], by_local
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], by_local, by_past
 
 
 def grounded(fact: str | None, corpus: str) -> bool:
@@ -496,8 +513,23 @@ def grounded(fact: str | None, corpus: str) -> bool:
     return sum(w in have for w in words) / len(words) >= 0.7
 
 
-def check_ai(q: Question, item: dict, corpus: str) -> Answer:
+def reused(q: Question, item: dict, by_past: dict[str, dict]) -> Answer | None:
+    """The LLM's answer when it reused one of your past answers, and really used that answer's value."""
+    row = by_past.get(str(item.get("past") or "").strip())
+    if not row:
+        return None
+    want, got = fit(q, row["value"]), fit(q, item.get("value"))
+    if want is None or got is None or not same(q, want, got):
+        return None
+    where = f" on the {row['company']} form" if row.get("company") else ""
+    return Answer(want, "memory", True, f'Reused your answer{where} to a question that means the same: '
+                                        f'"{row["label"][:90]}". Check it fits.', "~" + row["key"])
+
+
+def check_ai(q: Question, item: dict, corpus: str, by_past: dict[str, dict] | None = None) -> Answer:
     """Validate one LLM answer against the question and the candidate's facts."""
+    if by_past and (a := reused(q, item, by_past)):
+        return a
     value, fact = item.get("value"), (item.get("fact") or None)
     confident = item.get("confidence") in ("high", "medium") and not item.get("needs_human")
     is_grounded = grounded(fact, corpus)
@@ -525,11 +557,11 @@ def check_ai(q: Question, item: dict, corpus: str) -> Answer:
                   "AI draft; read and edit it before you submit.")
 
 
-def ask_llm(questions: list[Question], prof: dict, job: dict, cfg: dict) -> dict[str, Answer]:
+def ask_llm(questions: list[Question], prof: dict, job: dict, cfg: dict, past: list[dict] = ()) -> dict[str, Answer]:
     provs = ai.providers(cfg)
     if not provs or not questions:
         return {}
-    messages, by_local = build_messages(questions, prof, job)
+    messages, by_local, by_past = build_messages(questions, prof, job, past)
     corpus = candidate_block(prof) + "\n" + resume_block(prof, 20000) + "\n" + (prof.get("resume_text") or "")
     for p in provs:
         for attempt in (1, 2):
@@ -549,17 +581,23 @@ def ask_llm(questions: list[Question], prof: dict, job: dict, cfg: dict) -> dict
             out = {}
             for item in items:
                 if isinstance(item, dict) and (q := by_local.get(str(item.get("id", "")).strip())):
-                    out[q.id] = check_ai(q, item, corpus)
+                    out[q.id] = check_ai(q, item, corpus, by_past)
             return out
     return {}
 
 
 def draft(questions: list[Question], prof: dict, job: dict, cfg: dict, db) -> dict[str, Answer]:
     """An answer for every question, keyed by question id."""
+    from . import memory  # memory.py builds on this module
+
+    saved = db.memory_all()
     answers: dict[str, Answer] = {}
     for_llm = []
     for q in questions:
-        a = rule_answer(q, prof, job) or from_memory(q, db)
+        a = rule_answer(q, prof, job)
+        # Your earlier answer fills what the rules couldn't, and wins where you corrected a rule.
+        if a is None or (a.needs_you and a.empty) or memory.overrides(q, saved):
+            a = memory.recall(q, saved, cfg, job) or a
         if a is None:
             for_llm.append(q)
             continue
@@ -573,7 +611,7 @@ def draft(questions: list[Question], prof: dict, job: dict, cfg: dict, db) -> di
                 else:
                     a.value = choice
         answers[q.id] = a
-    llm = ask_llm(for_llm, prof, job, cfg)
+    llm = ask_llm(for_llm, prof, job, cfg, memory.related(saved, for_llm))
     why = "The AI couldn't answer this one." if ai.providers(cfg) else "No AI key is set, so this one is yours."
     for q in for_llm:
         answers[q.id] = llm.get(q.id) or (ask_you(why) if q.required else skip())

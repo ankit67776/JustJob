@@ -91,6 +91,15 @@ def _when(iso: str | None) -> str:
         return ""
 
 
+def outcome_line(out: dict | None) -> str:
+    """' 18 of 21 answers went in without an edit from you. 3 answers saved for next time.'"""
+    if not out or not out.get("fields"):
+        return ""
+    n = len(out.get("saved") or [])
+    return (f" {out['kept']} of {out['fields']} answers went in without an edit from you."
+            + (f" {n} answer{'s' if n != 1 else ''} saved for next time (see Answers)." if n else ""))
+
+
 def control(q: Question, a: Answer | None, resume_name: str | None) -> str:
     value = a.value if a else None
     name = f'name="{e(q.id)}" id="q-{e(q.id)}"'
@@ -169,7 +178,8 @@ def render(job: dict, app: dict | None, questions: list[Question], answers: dict
         if app.get("submitted_at"):
             shot = (' <a href="/apply/shot?job=' + e(job["id"]) + '" target="_blank" rel="noopener">See the confirmation page</a>'
                     if app.get("screenshot") else "")
-            notes = f'<p class="notice" role="status">Submitted {e(_when(app["submitted_at"]))}. Marked as applied.{shot}</p>' + notes
+            notes = (f'<p class="notice" role="status">Submitted {e(_when(app["submitted_at"]))}. Marked as applied.'
+                     f'{e(outcome_line((app.get("report") or {}).get("outcome")))}{shot}</p>' + notes)
         groups = []
         for key, title in GROUPS:
             qs = [q for q in questions if q.group == key]

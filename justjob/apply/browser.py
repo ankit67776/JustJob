@@ -4,6 +4,9 @@ Playwright (an optional extra) drives your installed Edge or Chrome with a brows
 own in data/browser, so cookies persist between applications. The agent never submits: it fills
 what it can, outlines what needs you, and waits. When the page shows a confirmation it saves a
 screenshot and marks the job applied. If you close the window instead, nothing is sent.
+
+While it waits it keeps reading what the fields hold, and reads them once more the moment you
+press Submit. After a confirmed submission those final answers are what memory.py learns from.
 """
 from __future__ import annotations
 
@@ -16,7 +19,8 @@ from pathlib import Path
 
 from ..db import DB
 from ..text import now_iso
-from .answers import DECLINE_RE, Answer, home_country, norm
+from . import memory
+from .answers import DECLINE_RE, Answer, home_country, norm, same
 from .forms import Question, Target
 
 log = logging.getLogger(__name__)
@@ -34,7 +38,8 @@ HIGHLIGHT_JS = """([ids, message]) => {
   };
   let first = null;
   for (const id of ids) {
-    const el = document.getElementById(id) || document.querySelector(`[name="${CSS.escape(id)}"]`);
+    const el = document.getElementById(id) || document.querySelector(`[name="${CSS.escape(id)}"]`)
+      || document.querySelector(`[data-field-path="${CSS.escape(id)}"]`);
     if (el) { const box = mark(el); first = first || box; }
   }
   document.getElementById('justjob-banner')?.remove();
@@ -53,7 +58,8 @@ HIGHLIGHT_JS = """([ids, message]) => {
 # Clicks the option labelled `text` inside the field whose input has this id or name: the nearest
 # ancestor holding such an option is that field's own box, so another question's "Yes" is never hit.
 CHOICE_JS = """([key, text]) => {
-  const el = document.getElementById(key) || document.querySelector(`[name="${CSS.escape(key)}"]`);
+  const el = document.getElementById(key) || document.querySelector(`[name="${CSS.escape(key)}"]`)
+    || document.querySelector(`[data-field-path="${CSS.escape(key)}"]`);
   if (!el) return 'missing';
   const want = text.trim().toLowerCase().replace(/\\s+/g, ' ');
   for (let box = el, i = 0; box && i < 8; box = box.parentElement, i++) {
@@ -64,6 +70,62 @@ CHOICE_JS = """([key, text]) => {
   return 'nomatch';
 }"""
 
+
+# What each field holds right now: {id: [texts]} ([] = nothing chosen, null = field not on the page).
+# Typed fields give their value. For the rest, the nearest box around the input that holds no other
+# question is searched for what's chosen: pressed Yes/No buttons (Ashby), the chosen value of a
+# searchable dropdown (Greenhouse's react-select), ticked radios and checkboxes, a native <select>.
+SNAPSHOT_JS = """(specs) => {
+  const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const find = (id) => document.getElementById(id) || document.querySelector(`[name="${CSS.escape(id)}"]`)
+    || document.querySelector(`[data-field-path="${CSS.escape(id)}"]`);
+  const els = specs.map((s) => find(s.id));
+  const labelOf = (i) => clean((i.labels && i.labels[0] && i.labels[0].innerText) || i.closest('label')?.innerText
+                                || i.parentElement?.innerText || i.value);
+  const chosenIn = (box) => {
+    let hits = [...box.querySelectorAll('[aria-pressed="true"], [aria-checked="true"]:not(input)')];
+    if (!hits.length) hits = [...box.querySelectorAll('[class*="single-value"], [class*="singleValue"], ' +
+                                                      '[class*="multi-value__label"], [class*="multiValue__label"]')];
+    if (hits.length) return hits.map((n) => clean(n.innerText));
+    const ticked = [...box.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked')];
+    if (ticked.length) return ticked.map(labelOf);
+    const sel = box.tagName === 'SELECT' ? box : box.querySelector('select');
+    return sel ? [...sel.selectedOptions].map((o) => clean(o.text)).filter((t) => t) : null;
+  };
+  const typed = ['text', 'textarea', 'email', 'phone', 'url', 'number', 'date', 'location'];
+  const textLike = 'input:not([type=hidden]):not([type=file]):not([type=radio]):not([type=checkbox]), textarea';
+  const out = {};
+  specs.forEach((s, n) => {
+    const el = els[n];
+    if (!el) { out[s.id] = null; return; }
+    // Ashby fields without an id are found by their wrapper; the input is inside it.
+    const input = el.matches('input, textarea, select') ? el : el.querySelector(textLike);
+    const own = input && input.matches(textLike) ? input : null;
+    if (typed.includes(s.kind) && own && own.getAttribute('role') !== 'combobox') { out[s.id] = [own.value]; return; }
+    let found = null;
+    for (let box = el, i = 0; box && i < 6 && !found; box = box.parentElement, i++) {
+      if (i && els.some((o, m) => m !== n && o && box.contains(o))) break;
+      found = chosenIn(box);
+    }
+    out[s.id] = found || (own && own.value ? [own.value] : []);
+  });
+  return out;
+}"""
+
+# Reads the form once more when you press Submit, before the page moves on. Runs in the capture
+# phase, so the reading comes before the page's own handlers.
+HOOK_JS = """(specs) => {
+  window.__justjobSpecs = specs;
+  window.__justjobRead = """ + SNAPSHOT_JS + """;
+  if (window.__justjobHooked) return;
+  window.__justjobHooked = true;
+  const send = () => { try { window.__justjobSubmit(window.__justjobRead(window.__justjobSpecs)); } catch (e) {} };
+  document.addEventListener('submit', send, true);
+  document.addEventListener('click', (ev) => {
+    const b = ev.target.closest && ev.target.closest('button, input[type=submit]');
+    if (b && (b.type === 'submit' || /submit|apply|send/i.test(b.innerText || b.value || ''))) send();
+  }, true);
+}"""
 
 TYPED_KINDS = ("text", "textarea", "email", "phone", "url", "number")
 
@@ -90,6 +152,8 @@ class Filler:
 
     def __init__(self, page, prof: dict, resume: Path | None):
         self.page, self.prof, self.resume = page, prof, resume
+        self.final: dict[str, list[str]] = {}   # question id -> what the field last held
+        self.specs: list[dict] = []
 
     def el(self, qid: str):
         return self.page.locator(f'[id="{_attr(qid)}"]').first
@@ -193,9 +257,9 @@ class Filler:
         for q, value in typed:
             try:
                 loc = self.el(q.id)
-                if loc.input_value() != value:
+                if not same(q, loc.input_value(), value):
                     loc.fill(value)
-                ok = loc.input_value() == value
+                ok = same(q, loc.input_value(), value)
             except Exception:
                 ok = False
             if not ok:
@@ -217,6 +281,28 @@ class Filler:
             return False   # still on the form
         return bool(CONFIRM_RE.search(self.page.inner_text("body", timeout=3000)[:20000]))
 
+    # -- reading your final answers back --------------------------------------------------------
+
+    def keep(self, reading: dict) -> None:
+        """Merge a reading of the form; a field that has vanished (the page moving on) keeps its last value."""
+        for qid, texts in (reading or {}).items():
+            if texts is not None:
+                self.final[qid] = texts
+
+    def read(self) -> None:
+        if self.specs:
+            self.keep(self.page.evaluate(SNAPSHOT_JS, self.specs))
+
+    def watch(self, questions: list[Question]) -> None:
+        """Start reading the form: now, while you work on it, and when you press Submit."""
+        self.specs = [{"id": q.id, "kind": q.kind} for q in questions if q.kind != "file"]
+        try:
+            self.page.expose_binding("__justjobSubmit", lambda source, reading: self.keep(reading))
+            self.page.evaluate(HOOK_JS, self.specs)
+            self.read()
+        except Exception as e:   # reading back is for learning; filling must not depend on it
+            log.info("apply: couldn't watch the form: %s", e)
+
     def wait_for_submit(self, minutes: float) -> str:
         """'submitted', 'closed' (you closed the window) or 'timeout'."""
         deadline = time.monotonic() + minutes * 60
@@ -226,6 +312,7 @@ class Filler:
             try:
                 if self.confirmed():
                     return "submitted"
+                self.read()
                 self.page.wait_for_timeout(1500)
             except Exception:
                 if self.page.is_closed():
@@ -278,7 +365,10 @@ class AshbyFiller(Filler):
     ready = '[id="_systemfield_email"], [name="_systemfield_email"]'
 
     def el(self, qid: str):
-        return self.page.locator(f'[id="{_attr(qid)}"], [name="{_attr(qid)}"]').first
+        # Some inputs (the location search box) have neither id nor name, only a wrapper naming the field.
+        a = _attr(qid)
+        return self.page.locator(f'[id="{a}"], [name="{a}"], [data-field-path="{a}"] :is(input:not([type=radio]):not([type=checkbox]), '
+                                 f'textarea)').first
 
     def fill(self, q: Question, value) -> bool:
         if q.kind == "file":
@@ -319,7 +409,7 @@ def _say(job_id: str, state: str, message: str) -> None:
 
 def start(job_id: str, target: Target, questions: list[Question], answers: dict[str, Answer], *, prof: dict,
           resume: Path | None, db_path: str, data_dir: Path, browser: str = "msedge", wait_minutes: float = 45,
-          headless: bool = False) -> str | None:
+          headless: bool = False, job: dict | None = None) -> str | None:
     """Open the form in the background. Returns an error message, or None once it has started."""
     try:
         import playwright.sync_api  # noqa: F401
@@ -328,12 +418,13 @@ def start(job_id: str, target: Target, questions: list[Question], answers: dict[
     if not _lock.acquire(blocking=False):
         return "Another application is open in the browser. Submit it or close that window first."
     _say(job_id, "filling", "Opening the browser…")
-    args = (job_id, target, questions, answers, prof, resume, db_path, data_dir, browser, wait_minutes, headless)
+    args = (job_id, target, questions, answers, prof, resume, db_path, data_dir, browser, wait_minutes, headless,
+            job or {"id": job_id})
     threading.Thread(target=_session, args=args, name="apply", daemon=True).start()
     return None
 
 
-def _session(job_id, target, questions, answers, prof, resume, db_path, data_dir, browser, wait_minutes, headless):
+def _session(job_id, target, questions, answers, prof, resume, db_path, data_dir, browser, wait_minutes, headless, job):
     from playwright.sync_api import sync_playwright
 
     db = DB(db_path)
@@ -344,7 +435,7 @@ def _session(job_id, target, questions, answers, prof, resume, db_path, data_dir
                 str(data_dir / "browser"), channel=browser or None, headless=headless,
                 no_viewport=not headless, args=[] if headless else ["--start-maximized"])
             try:
-                outcome = _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, wait_minutes)
+                outcome = _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, wait_minutes, job)
             finally:
                 try:
                     ctx.close()
@@ -360,7 +451,16 @@ def _session(job_id, target, questions, answers, prof, resume, db_path, data_dir
         _lock.release()
 
 
-def _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, wait_minutes) -> str:
+def learned_line(outcome: dict) -> str:
+    """'Saved 3 answers for next time. Your profile now says: ...' or ''."""
+    n = len(outcome.get("saved") or [])
+    line = f" Saved {n} answer{'s' if n != 1 else ''} for next time." if n else ""
+    if outcome.get("profile"):
+        line += " Your profile now says: " + " ".join(outcome["profile"])
+    return line
+
+
+def _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, wait_minutes, job) -> str:
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.set_default_timeout(8000)
     filler = FILLERS[target.ats](page, prof, resume)
@@ -378,6 +478,7 @@ def _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, 
     _say(job_id, "filling", "Filling in the form…")
     report = filler.fill_all(questions, answers)
     filler.highlight(report)
+    filler.watch(questions)
     db.update_application(job_id, now_iso(), state="waiting", report=report)
     left = len(report["todo"])
     _say(job_id, "waiting", f"Filled {len(report['filled'])} fields"
@@ -395,9 +496,13 @@ def _drive(ctx, db, job_id, target, questions, answers, prof, resume, data_dir, 
             page.screenshot(path=str(shots / name), full_page=True)
         except Exception:
             name = None
-        db.update_application(job_id, now, state="submitted", submitted_at=now, screenshot=name)
+        try:
+            report["outcome"] = memory.learn(db, job, questions, answers, filler.final, now, prof)
+        except Exception:   # learning must never cost you the record of a sent application
+            log.exception("apply: learning from %s failed", job_id)
+        db.update_application(job_id, now, state="submitted", submitted_at=now, screenshot=name, report=report)
         db.set_status(job_id, "applied", now)
-        _say(job_id, "submitted", "Submitted. The job is marked as applied.")
+        _say(job_id, "submitted", "Submitted. The job is marked as applied." + learned_line(report.get("outcome") or {}))
     elif outcome == "closed":
         db.update_application(job_id, now, state="closed")
         _say(job_id, "closed", "The browser window was closed before submitting. Nothing was sent.")

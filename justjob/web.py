@@ -21,9 +21,11 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import ai, apply_page, profile, profile_page, registry
+from . import ai, answers_page, apply_page, profile, profile_page, registry
 from .apply import agent as apply_agent
 from .apply import browser as apply_browser
+from .apply import memory
+from .apply.answers import fit
 from .apply.forms import FormError
 from .apply.forms import target as apply_target
 from .db import DB, REFILTER_PENDING, SHOWABLE, STATUSES, score_sql
@@ -746,7 +748,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, login_html(next_url=qs.get("next", ["/"])[0]))
         if url.path == "/logout":
             return self._redirect("/login", self._cookie("", 0))
-        if url.path not in ("/", "/description", "/profile", "/profile/resume", "/apply", "/apply/status", "/apply/shot"):
+        if url.path not in ("/", "/description", "/profile", "/profile/resume", "/apply", "/apply/status", "/apply/shot",
+                            "/answers"):
             return self._send(404, "not found", "text/plain")
         if not self._signed_in():
             if url.path in ("/description", "/profile/resume", "/apply/status", "/apply/shot"):
@@ -761,6 +764,10 @@ class Handler(BaseHTTPRequestHandler):
                 notice = profile_page.notice_for(qs.get("done", [""])[0], qs.get("n", [""])[0])
                 warn = profile_page.warning_for(qs.get("bad", [""])[0].split(","))
                 return self._send(200, profile_page.render(prof, bool(ai.providers(self.cfg)), notice, warn))
+            if url.path == "/answers":
+                return self._send(200, answers_page.render(db.memory_all(), db.submitted_applications(),
+                                                           memory.trust_after(self.cfg),
+                                                           answers_page.notice_for(qs.get("done", [""])[0])))
             if url.path == "/profile/resume":
                 path = profile.resume_path(Path(self.db_path).parent, profile.load(db, self.cfg))
                 if not path:
@@ -784,7 +791,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._login()
         action = {"/status": self._post_status, "/profile": self._post_profile,
                   "/profile/resume": self._post_resume, "/profile/parse": self._post_parse,
-                  "/apply/draft": self._post_draft, "/apply/fill": self._post_fill}.get(path)
+                  "/apply/draft": self._post_draft, "/apply/fill": self._post_fill,
+                  "/answers/save": self._post_answer_save, "/answers/delete": self._post_answer_delete}.get(path)
         if not action:
             return self._send(404, "not found", "text/plain")
         # Only accept requests from this page, not from other sites open in the browser.
@@ -856,6 +864,34 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._send(409 if err else 200, err or "ok", "text/plain; charset=utf-8")
+
+    # -- saved answers ----------------------------------------------------------------------
+
+    def _post_answer_save(self) -> None:
+        """Your edit on the Answers page. You chose it there, so it fills without asking from now on."""
+        form = self._form(limit=50_000, blank=True)
+        db = DB(self.db_path)
+        try:
+            row = db.memory_get(form.get("key", [""])[0])
+            if not row:
+                return self._send(404, "That answer isn't saved anymore.", "text/plain; charset=utf-8")
+            q = answers_page.as_question(row)
+            raw = [v.strip() for v in form.get("value", [])]
+            value = fit(q, raw if q.kind == "multiselect" else (raw[0] if raw else ""))
+            done = "invalid" if value is None else "saved"
+            if value is not None:
+                db.memory_edit(row["key"], value, max(row["confirmed"], memory.trust_after(self.cfg)), now_iso())
+        finally:
+            db.close()
+        self._redirect(f"/answers?done={done}")
+
+    def _post_answer_delete(self) -> None:
+        db = DB(self.db_path)
+        try:
+            db.memory_delete(self._form().get("key", [""])[0])
+        finally:
+            db.close()
+        self._redirect("/answers?done=deleted")
 
     # -- profile ----------------------------------------------------------------------------
 

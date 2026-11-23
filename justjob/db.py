@@ -83,15 +83,31 @@ CREATE TABLE IF NOT EXISTS applications (
     updated_at   TEXT NOT NULL,
     submitted_at TEXT
 );
--- Answers you approved, reused when another form asks the same question.
+-- Answers you gave on submitted forms, reused when another form asks the same question (apply/memory.py).
 CREATE TABLE IF NOT EXISTS answer_memory (
     key         TEXT PRIMARY KEY,   -- normalized question label + its options
     label       TEXT NOT NULL,
     value       TEXT NOT NULL,      -- JSON
-    uses        INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT NOT NULL
+    uses        INTEGER NOT NULL DEFAULT 0,   -- times it was saved
+    updated_at  TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'text', -- the question's kind (see apply/forms.py)
+    options     TEXT,               -- JSON: the question's options
+    confirmed   INTEGER NOT NULL DEFAULT 1,   -- forms you gave or kept this exact answer on
+    overrides   INTEGER NOT NULL DEFAULT 0,   -- 1 = you corrected the profile's or a rule's answer
+    company     TEXT NOT NULL DEFAULT '',     -- the company whose form it was last given on
+    job_id      TEXT NOT NULL DEFAULT ''
 );
 """
+# Columns added after a table was first created: (table, column, definition).
+ADDED_COLUMNS = (
+    ("jobs", "matched_skills", "TEXT"),
+    ("answer_memory", "kind", "TEXT NOT NULL DEFAULT 'text'"),
+    ("answer_memory", "options", "TEXT"),
+    ("answer_memory", "confirmed", "INTEGER NOT NULL DEFAULT 1"),
+    ("answer_memory", "overrides", "INTEGER NOT NULL DEFAULT 0"),
+    ("answer_memory", "company", "TEXT NOT NULL DEFAULT ''"),
+    ("answer_memory", "job_id", "TEXT NOT NULL DEFAULT ''"),
+)
 APP_JSON = ("questions", "answers", "report")
 
 def score_sql(cfg: dict) -> str:
@@ -131,10 +147,12 @@ class DB:
 
     def _migrate(self) -> None:
         """Add columns introduced after a database was created."""
-        have = {r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")}
-        for column, kind in (("matched_skills", "TEXT"),):
-            if column not in have:
-                self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {kind}")
+        have: dict[str, set[str]] = {}
+        for table, column, definition in ADDED_COLUMNS:
+            if table not in have:
+                have[table] = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have[table]:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -304,16 +322,51 @@ class DB:
     def submitted_since(self, since: str) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM applications WHERE submitted_at >= ?", (since,)).fetchone()[0]
 
-    def recall_answer(self, key: str):
-        row = self.conn.execute("SELECT value FROM answer_memory WHERE key = ?", (key,)).fetchone()
-        return json.loads(row[0]) if row else None
+    def submitted_applications(self, limit: int = 20) -> list[dict]:
+        """Applications sent through the agent, newest first, with their job's title and company."""
+        rows = self.q("SELECT a.job_id, a.report, a.submitted_at, j.title, j.company FROM applications a"
+                      " LEFT JOIN jobs j ON j.id = a.job_id WHERE a.submitted_at IS NOT NULL"
+                      " ORDER BY a.submitted_at DESC LIMIT ?", (limit,))
+        return [{**dict(r), "report": json.loads(r["report"]) if r["report"] else {}} for r in rows]
 
-    def remember_answer(self, key: str, label: str, value, now: str) -> None:
+    # Saved answers (apply/memory.py).
+
+    @staticmethod
+    def _memory_row(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d["value"] = json.loads(d["value"])
+        d["options"] = json.loads(d["options"]) if d["options"] else []
+        return d
+
+    def memory_all(self) -> list[dict]:
+        return [self._memory_row(r) for r in self.q("SELECT * FROM answer_memory ORDER BY updated_at DESC")]
+
+    def memory_get(self, key: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM answer_memory WHERE key = ?", (key,)).fetchone()
+        return self._memory_row(row) if row else None
+
+    def memory_save(self, key: str, label: str, kind: str, options: list[str], value, confirmed: int, overrides: bool,
+                    company: str, job_id: str, now: str) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO answer_memory (key, label, value, uses, updated_at) VALUES (?, ?, ?, 1, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, uses = uses + 1, updated_at = excluded.updated_at",
-                (key, label, json.dumps(value, ensure_ascii=False), now))
+                "INSERT INTO answer_memory (key, label, value, uses, updated_at, kind, options, confirmed, overrides,"
+                " company, job_id) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET label = excluded.label, value = excluded.value, uses = uses + 1,"
+                " updated_at = excluded.updated_at, kind = excluded.kind, options = excluded.options,"
+                " confirmed = excluded.confirmed, overrides = excluded.overrides, company = excluded.company,"
+                " job_id = excluded.job_id",
+                (key, label, json.dumps(value, ensure_ascii=False), now, kind, json.dumps(options, ensure_ascii=False),
+                 confirmed, int(overrides), company, job_id))
+
+    def memory_edit(self, key: str, value, confirmed: int, now: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("UPDATE answer_memory SET value = ?, confirmed = ?, updated_at = ? WHERE key = ?",
+                                    (json.dumps(value, ensure_ascii=False), confirmed, now, key))
+        return cur.rowcount > 0
+
+    def memory_delete(self, key: str) -> bool:
+        with self.conn:
+            return self.conn.execute("DELETE FROM answer_memory WHERE key = ?", (key,)).rowcount > 0
 
     def set_status(self, job_id: str, status: str, now: str) -> bool:
         if status not in STATUSES:
