@@ -19,14 +19,35 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .. import registry
 from ..models import BoardResult, Job
-from . import (adzuna, ashby, bamboohr, breezy, gem, greenhouse, hackernews, himalayas, jobicy, jsearch, lever,
-               personio, recruitee, remoteok, remotive, rippling, smartrecruiters, teamtailor, weworkremotely,
-               workable, workday, workingnomads)
+from . import (
+    adzuna,
+    ashby,
+    bamboohr,
+    breezy,
+    gem,
+    greenhouse,
+    hackernews,
+    himalayas,
+    jobicy,
+    jsearch,
+    lever,
+    personio,
+    recruitee,
+    remoteok,
+    remotive,
+    rippling,
+    smartrecruiters,
+    teamtailor,
+    weworkremotely,
+    workable,
+    workday,
+    workingnomads,
+)
 
 log = logging.getLogger(__name__)
 

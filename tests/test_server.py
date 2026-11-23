@@ -4,7 +4,7 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -119,7 +119,7 @@ class HotRefreshTests(unittest.TestCase):
         cfg = make_cfg()
         cfg["sources"] = {"greenhouse": {"enabled": True, "boards": {"picked": "Picked"}}}
         db = DB(":memory:")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         old = (now - timedelta(days=200)).isoformat(timespec="seconds")
         db.insert_jobs([Job("greenhouse", "1", "AI Engineer", "Hot", "https://x/1", "Remote", True,
                             "2+ years of Python", None, "", "greenhouse:hot")], now.isoformat(timespec="seconds"))

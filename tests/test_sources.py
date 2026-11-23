@@ -79,9 +79,11 @@ class DiscoverTests(unittest.TestCase):
     def test_find_and_add(self):
         import tempfile
         from pathlib import Path
+
         from justjob import discover, registry
         from justjob.db import DB
         from justjob.models import Job
+
         from .helpers import make_cfg
         cfg = make_cfg()
         cfg["sources"] = {"greenhouse": {"boards": {"acme": "Acme"}}, "workable": {"boards": {}}}

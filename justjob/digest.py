@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .config import DATA_DIR
-from .db import DB, score_sql, SHOWABLE
+from .db import DB, SHOWABLE, score_sql
 from .sources import source_label
 from .text import now_iso
 from .web import experience_label, flags, page, render_job, why_label

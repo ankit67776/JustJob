@@ -27,7 +27,7 @@ class TextTests(unittest.TestCase):
         self.assertIn("2+ years", out)
 
     def test_trim_prefers_requirements(self):
-        text = "\n".join(["Fluffy company story line number %d." % i for i in range(50)]
+        text = "\n".join([f"Fluffy company story line number {i}." for i in range(50)]
                          + ["Requirements: 2+ years of experience with PyTorch."])
         self.assertIn("PyTorch", trim_for_ai(text, 200))
 

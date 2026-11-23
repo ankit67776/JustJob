@@ -1,7 +1,6 @@
 """Company discovery from the Common Crawl index, and the companies/ registry."""
 import gzip
 import io
-import json
 import tempfile
 import unittest
 from collections import Counter
@@ -33,11 +32,11 @@ class HarvestTests(unittest.TestCase):
 
     def test_index_slices_include_block_before_prefix(self):
         cluster = (
-            "co,example)/ 2026\tcdx-00001.gz\t0\t100\t1\n"
-            "io,greenhouse,boards)/acme 2026\tcdx-00001.gz\t100\t100\t2\n"
-            "io,greenhouse,boards)/zeta 2026\tcdx-00001.gz\t200\t100\t3\n"
-            "io,hubspot)/ 2026\tcdx-00001.gz\t300\t100\t4\n"
-        ).encode()
+            b"co,example)/ 2026\tcdx-00001.gz\t0\t100\t1\n"
+            b"io,greenhouse,boards)/acme 2026\tcdx-00001.gz\t100\t100\t2\n"
+            b"io,greenhouse,boards)/zeta 2026\tcdx-00001.gz\t200\t100\t3\n"
+            b"io,hubspot)/ 2026\tcdx-00001.gz\t300\t100\t4\n"
+        )
         with mock.patch.object(harvest.urllib.request, "urlopen", return_value=FakeResponse(cluster)):
             slices = harvest.index_slices("CC-X", {"greenhouse": ("io,greenhouse,",)})
         self.assertEqual(slices["greenhouse"], [("cdx-00001.gz", 0, 100), ("cdx-00001.gz", 100, 100),

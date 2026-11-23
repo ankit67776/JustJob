@@ -23,7 +23,7 @@ class PipelineTests(unittest.TestCase):
         self.db.close()
 
     def fetch_with(self, results):
-        tasks = [(r.board, (lambda r=r: (lambda ctx: r))()) for r in results]
+        tasks = [(r.board, lambda ctx, r=r: r) for r in results]
         with mock.patch.object(pipeline, "build_tasks", return_value=tasks):
             return pipeline.fetch(self.cfg, self.db)
 
@@ -84,6 +84,7 @@ class PipelineTests(unittest.TestCase):
         # 429 comes back. Stopping the source must not leave futures that never finish.
         import threading
         import time
+
         from justjob.net import HttpError
         ran = []
 
@@ -109,7 +110,7 @@ class PipelineTests(unittest.TestCase):
 
         def busy(ctx):
             raise HttpError(429, "https://acme.wd1.myworkdayjobs.com/x", "")
-        ok = [(f"workday:co{i}/wd1/ext", (lambda i: lambda ctx: BoardResult(f"workday:co{i}/wd1/ext", [], True))(i))
+        ok = [(f"workday:co{i}/wd1/ext", lambda ctx, i=i: BoardResult(f"workday:co{i}/wd1/ext", [], True))
               for i in range(6)]
         with mock.patch.object(pipeline, "build_tasks", return_value=[("workday:busy/wd1/ext", busy)] + ok):
             stats = pipeline.fetch(self.cfg, self.db)
@@ -119,7 +120,7 @@ class PipelineTests(unittest.TestCase):
     def test_rotation_caps_boards_per_run(self):
         self.cfg["sources"] = {"workable": {"max_boards": 2}}
         seen = []
-        tasks = [(f"workable:co{i}", (lambda i: lambda ctx: seen.append(i) or BoardResult(f"workable:co{i}", [], True))(i))
+        tasks = [(f"workable:co{i}", lambda ctx, i=i: seen.append(i) or BoardResult(f"workable:co{i}", [], True))
                  for i in range(5)]
         with mock.patch.object(pipeline, "build_tasks", return_value=tasks):
             for _ in range(3):

@@ -10,7 +10,7 @@ import html
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 
 from ..models import BoardResult, Job
@@ -78,7 +78,7 @@ def posted_on(text: str | None, now: datetime | None = None) -> str | None:
     """'Posted Today' / 'Posted Yesterday' / 'Posted 5 Days Ago' / 'Posted 30+ Days Ago' -> ISO date."""
     if not text:
         return None
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     low = text.lower()
     if "today" in low:
         days = 0
@@ -149,7 +149,7 @@ def fetch_board(slug: str, name: str, ctx) -> BoardResult:
     postings, complete = _listing(slug, search_query(ctx.search))
     jobs = [to_job(slug, name, p) for p in postings]
     listed = [j.id for j in jobs]
-    paths = {j.id: p["externalPath"] for j, p in zip(jobs, postings)}
+    paths = {j.id: p["externalPath"] for j, p in zip(jobs, postings, strict=True)}
 
     def detail(job: Job) -> Job | None:
         try:

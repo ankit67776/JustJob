@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _LI = re.compile(r"<li\b[^>]*>", re.I)
 _BLOCK = re.compile(r"</?(?:p|div|br|ul|ol|li|h[1-6]|tr|table|section|article|header|footer)\b[^>]*>", re.I)
@@ -85,7 +85,7 @@ def dedup_key(company: str, title: str) -> str:
 # --- dates -------------------------------------------------------------------------------
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def to_iso(value) -> str | None:
@@ -95,13 +95,13 @@ def to_iso(value) -> str | None:
     try:
         if isinstance(value, (int, float)):
             ts = value / 1000 if value > 1e11 else value
-            dt = datetime.fromtimestamp(ts, timezone.utc)
+            dt = datetime.fromtimestamp(ts, UTC)
         else:
             s = str(value).strip().replace("Z", "+00:00")
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+                dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).isoformat(timespec="seconds")
     except (ValueError, OverflowError, OSError):
         return None
 
@@ -134,7 +134,7 @@ def trim_for_ai(text: str, limit: int) -> str:
         if not line or _BOILERPLATE.search(line):
             continue
         lines.append(line[:500])
-    if sum(len(l) + 1 for l in lines) <= limit:
+    if sum(len(s) + 1 for s in lines) <= limit:
         return "\n".join(lines)
 
     keep = [False] * len(lines)
@@ -147,4 +147,4 @@ def trim_for_ai(text: str, limit: int) -> str:
                 continue
             keep[i] = True
             budget -= len(line) + 1
-    return "\n".join(l for l, k in zip(lines, keep) if k)
+    return "\n".join(s for s, k in zip(lines, keep, strict=True) if k)

@@ -1,11 +1,11 @@
 """Workday, Teamtailor, Rippling and Gem parsers against canned API responses (no network)."""
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 
 from justjob.sources import FetchContext, gem, rippling, teamtailor, workday
 
-NOW = datetime(2026, 10, 20, 15, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 20, 15, 30, tzinfo=UTC)
 
 
 class WorkdayTests(unittest.TestCase):

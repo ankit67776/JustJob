@@ -31,7 +31,7 @@ def run_lock(path: Path, wait: float = 0):
     """Yields True while holding the lock, or False if another run still held it after `wait`
     seconds. It's an OS file lock, so a crashed or killed run never leaves a stale one behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "a+")
+    f = open(path, "a+")  # noqa: SIM115 - stays open as long as the lock is held
     try:
         deadline = time.monotonic() + wait
         while True:

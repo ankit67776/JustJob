@@ -19,7 +19,7 @@ import time
 import urllib.request
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import registry
@@ -76,7 +76,7 @@ def recent_crawls(n: int) -> list[str]:
     except Exception as e:   # the index server is often overloaded; the data host isn't
         log.info("harvest: crawl list unavailable (%s); probing recent weeks instead", e)
     found: list[str] = []
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     for weeks_back in range(0, 80):
         year, week, _ = (today - timedelta(weeks=weeks_back)).isocalendar()
         crawl = f"CC-MAIN-{year}-{week:02d}"
@@ -190,7 +190,7 @@ def save_checked(checked: dict[tuple[str, str], str], path: Path = CHECKED) -> N
 def candidates(cfg: dict, found: dict[str, Counter], recheck_days: int,
                checked: dict[tuple[str, str], str]) -> dict[str, list[str]]:
     """New slugs worth checking, most-linked first."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=recheck_days)).date().isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=recheck_days)).date().isoformat()
     out = {}
     for ats, counts in found.items():
         sc = cfg["sources"].get(ats, {})
@@ -206,7 +206,7 @@ def verify(cfg: dict, todo: dict[str, list[str]], min_jobs: int = 1, checked=Non
     """Probe every candidate, each ATS in its own pool. Live boards go to companies/<ats>.tsv as
     they're found (so an interrupted run keeps its progress); dead ones to `checked`."""
     checked = {} if checked is None else checked
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     live: dict[str, dict[str, tuple[str, int]]] = defaultdict(dict)
     pending: dict[str, dict[str, tuple[str, int]]] = defaultdict(dict)
     total = sum(len(v) for v in todo.values())
