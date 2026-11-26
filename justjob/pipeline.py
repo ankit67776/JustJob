@@ -175,7 +175,8 @@ def apply_rules(cfg: dict, db: DB, everything: bool = False) -> dict:
     """Run the rule filter on unfiltered jobs (or all open ones, after you change the config)."""
     rules = Rules(cfg)
     where = "closed = 0" if everything else "rule_status IS NULL"
-    rows = db.q(f"SELECT id, title, location, remote, description FROM jobs WHERE {where}")
+    # Applications you added by hand (tracker.py) were never fetched; filtering or scoring them means nothing.
+    rows = db.q(f"SELECT id, title, location, remote, description FROM jobs WHERE {where} AND source != 'manual'")
     results = []
     counts = Counter()
     for r in rows:

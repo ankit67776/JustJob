@@ -115,6 +115,20 @@ Each application records how many answers went in without an edit from me. The A
 that per application, so I can see the agent getting better, and lists every saved answer to edit or
 delete.
 
+**Tracker.** Marking a job applied, or submitting it through the agent, puts it on the Applications
+board at Applied. From there it moves through Screening, Interview and Offer, by dragging the card or
+picking its stage, and ends as Accepted, Rejected, Withdrawn or No response. Every move and note is
+kept, so each application has a timeline. A card that's been quiet for a week asks for a follow-up,
+and one with no reply in three weeks offers to close itself as No response. Applications made
+elsewhere (a referral, LinkedIn) can be added by hand; the pipeline leaves those alone.
+
+**Insights.** For the last 30 or 90 days or all time: how many applications got a reply (any answer,
+rejections included), reached an interview or an offer, and the median wait for a first reply; a
+funnel of how far applications got; reply rates by where I found the job, role type, match score and
+whether the agent sent it; and applications per week. The match-score breakdown is the one I watch:
+it says whether the jobs Just Job ranks highest actually answer more often. Every chart has a table
+view.
+
 ## Design decisions
 
 - Rules first, AI only where it's needed. Regexes and keyword checks are free and deterministic, and
@@ -147,9 +161,10 @@ Without any keys it runs on the free sources with rule-based ranking.
 |---|---|
 | `run` | Full pipeline (`--only greenhouse,ashby`, `--no-ai`, `--no-notify`) |
 | `run --hot` | Quick refresh: companies with a match in the last 60 days, plus the remote boards |
-| `serve` | Dashboard with the Jobs, Profile and Answers pages. `--host 0.0.0.0` needs `DASHBOARD_PASSWORD` in `.env` |
+| `serve` | Dashboard with the Jobs, Applications, Insights, Profile and Answers pages. `--host 0.0.0.0` needs `DASHBOARD_PASSWORD` in `.env` |
 | `list`, `mark <id> applied` | The same from the terminal |
 | `apply <id> [--fill]` | Draft answers for a job's form and print them; `--fill` opens it in the browser |
+| `stage <id> interview [--note ...]` | Move an application along: `screening`, `interview`, `offer`, `accepted`, `rejected`, `withdrawn`, `no_response` |
 | `refilter` | Re-apply edited filters to stored jobs |
 | `analyze [--redo]` | AI step only; `--redo` re-scores after a profile change |
 | `stats` | Companies tracked, board health, per-source counts and top rejection reasons |
@@ -193,12 +208,15 @@ justjob/
   ai.py            batching, prompt, JSON validation, provider fallback
   db.py            SQLite schema and queries
   profile.py       profile fields, resume text extraction, LLM resume parsing
+  tracker.py       application stages, history, follow-up nudges and the Insights numbers
   apply/           the apply agent: forms.py (form schemas), answers.py (drafting), browser.py (filling),
                    memory.py (learning from submitted forms)
   web.py           dashboard server (stdlib http.server) and the Jobs page
   profile_page.py  Profile page
   apply_page.py    apply review page
   answers_page.py  Answers page: what the agent learned, and how often it needed no edit
+  tracker_page.py  Applications board and the page for one application
+  insights_page.py Insights page
   ui.py            shared styles and top bar
   digest.py        Markdown and HTML daily digest
 tests/             unit and end-to-end tests (fake sources, fake LLM server, in-memory DB)
@@ -215,7 +233,6 @@ The browser tests need Playwright and Edge, and are skipped without them.
 
 ## Roadmap
 
-- Application tracker with stages (assessment, interview, offer) and a funnel by source and score.
 - Evals: a labeled set from my Applied and Hidden decisions for the scoring, and question/answer pairs
   for the apply agent, run in CI.
 - More forms for the agent: Workable, BambooHR, Breezy, Lever.

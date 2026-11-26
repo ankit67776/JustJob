@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from . import ai, digest, discover, harvest, pipeline, profile, registry, web
+from . import ai, digest, discover, harvest, pipeline, profile, registry, tracker, web
 from .config import DATA_DIR, load_config
 from .db import DB, REFILTER_PENDING, SHOWABLE, STATUSES, score_sql
 from .lock import run_lock
@@ -175,6 +175,13 @@ def cmd_apply(cfg, db, args):
     print(browser.LIVE.get(job_id, {}).get("message", ""))
 
 
+def cmd_stage(cfg, db, args):
+    job_id = _one_job(db, args.id)
+    if not tracker.set_stage(db, job_id, args.stage, now_iso(), args.note):
+        sys.exit(f"{job_id} isn't marked as applied yet. Run: python -m justjob mark {job_id} applied")
+    print(f"{job_id} -> {tracker.LABELS[args.stage]}")
+
+
 def cmd_stats(cfg, db, args):
     tracked = {ats: len(registry.load(ats)) for ats in ATS}
     print(f"Companies in companies/*.tsv: {sum(tracked.values())}  "
@@ -318,6 +325,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("id", help="job id (or a unique ending of it)")
     p.add_argument("status", choices=STATUSES)
     p.set_defaults(fn=cmd_mark)
+
+    p = sub.add_parser("stage", help="move an application along (screening, interview, offer, rejected, ...)")
+    p.add_argument("id", help="job id (or a unique ending of it)")
+    p.add_argument("stage", choices=list(tracker.LABELS))
+    p.add_argument("--note", default="", help="what happened, e.g. 'Recruiter call on Monday'")
+    p.set_defaults(fn=cmd_stage)
 
     p = sub.add_parser("apply", help="draft answers for a job's application form (Greenhouse, Ashby)")
     p.add_argument("id", help="job id (or a unique ending of it)")

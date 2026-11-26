@@ -13,15 +13,14 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-import zlib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import ai, answers_page, apply_page, profile, profile_page, registry
+from . import ai, answers_page, apply_page, insights_page, profile, profile_page, registry, tracker, tracker_page
 from .apply import agent as apply_agent
 from .apply import browser as apply_browser
 from .apply import memory
@@ -31,7 +30,7 @@ from .apply.forms import target as apply_target
 from .db import DB, REFILTER_PENDING, SHOWABLE, STATUSES, score_sql
 from .sources import ATS, DISPLAY, source_label
 from .text import now_iso
-from .ui import CSS, e, top_bar
+from .ui import CSS, e, monogram, top_bar
 
 log = logging.getLogger(__name__)
 
@@ -176,13 +175,6 @@ def _score_class(score: int) -> str:
     return "hi" if score >= 70 else ("mid" if score >= 45 else "lo")
 
 
-def monogram(company: str) -> tuple[str, int]:
-    """Two letters and a stable hue per company, so the same employer is easy to spot."""
-    words = re.findall(r"[A-Za-z0-9]+", company) or ["?"]
-    letters = (words[0][0] + (words[1][0] if len(words) > 1 else words[0][1:2])).upper()
-    return letters, zlib.crc32(company.lower().encode()) % 360
-
-
 def posted_label(r) -> tuple[str, str, bool]:
     """('3d ago', 'Posted 17 Oct 2026', fresh?). Falls back to when we first saw the job."""
     iso, verb = r["posted_at"], "Posted"
@@ -246,7 +238,14 @@ def render_job(r, interactive: bool, new_since: str | None = None) -> str:
     side = f'<span class="posted{" fresh" if fresh else ""}" title="{e(full)}">{e(short)}</span>'
     if r["status"] == "applied":
         a_short, a_full = applied_label(r["status_at"])
-        side = f'<span class="applied-on" title="{e(a_full)}">{e(a_short)}</span>' + side
+        stage = dict(r).get("stage")   # rows from SELECT *; the digest may pass rows without it
+        if stage and stage != "applied":
+            a_short = tracker.LABELS.get(stage, a_short)
+        if interactive:
+            link = f'/tracker/job?{e(urllib.parse.urlencode({"id": r["id"]}))}'
+            side = f'<a class="applied-on" href="{link}" title="{e(a_full)}. Open on Applications">{e(a_short)}</a>' + side
+        else:
+            side = f'<span class="applied-on" title="{e(a_full)}">{e(a_short)}</span>' + side
     side += f'<a class="btn apply" href="{e(r["url"])}" target="_blank" rel="noopener">Apply</a>'
     if interactive and apply_target(r):
         side += (f'<a class="btn autofill" href="/apply?{e(urllib.parse.urlencode({"job": r["id"]}))}" '
@@ -749,7 +748,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/logout":
             return self._redirect("/login", self._cookie("", 0))
         if url.path not in ("/", "/description", "/profile", "/profile/resume", "/apply", "/apply/status", "/apply/shot",
-                            "/answers"):
+                            "/answers", "/tracker", "/tracker/job", "/insights"):
             return self._send(404, "not found", "text/plain")
         if not self._signed_in():
             if url.path in ("/description", "/profile/resume", "/apply/status", "/apply/shot"):
@@ -764,6 +763,17 @@ class Handler(BaseHTTPRequestHandler):
                 notice = profile_page.notice_for(qs.get("done", [""])[0], qs.get("n", [""])[0])
                 warn = profile_page.warning_for(qs.get("bad", [""])[0].split(","))
                 return self._send(200, profile_page.render(prof, bool(ai.providers(self.cfg)), notice, warn))
+            if url.path == "/tracker":
+                return self._send(200, tracker_page.render_board(db.tracked(), now_iso(),
+                                                                 tracker_page.notice_for(qs.get("done", [""])[0]),
+                                                                 show_add=qs.get("add", [""])[0] == "1"))
+            if url.path == "/tracker/job":
+                return self._get_tracked(db, qs.get("id", [""])[0])
+            if url.path == "/insights":
+                key = qs.get("range", ["90"])[0]
+                key = key if key in insights_page.RANGES else "90"
+                ins = tracker.insights(db, now_iso(), insights_page.RANGES[key][1])
+                return self._send(200, insights_page.render(ins, key))
             if url.path == "/answers":
                 return self._send(200, answers_page.render(db.memory_all(), db.submitted_applications(),
                                                            memory.trust_after(self.cfg),
@@ -792,7 +802,9 @@ class Handler(BaseHTTPRequestHandler):
         action = {"/status": self._post_status, "/profile": self._post_profile,
                   "/profile/resume": self._post_resume, "/profile/parse": self._post_parse,
                   "/apply/draft": self._post_draft, "/apply/fill": self._post_fill,
-                  "/answers/save": self._post_answer_save, "/answers/delete": self._post_answer_delete}.get(path)
+                  "/answers/save": self._post_answer_save, "/answers/delete": self._post_answer_delete,
+                  "/tracker/stage": self._post_stage, "/tracker/note": self._post_note,
+                  "/tracker/add": self._post_add_application}.get(path)
         if not action:
             return self._send(404, "not found", "text/plain")
         # Only accept requests from this page, not from other sites open in the browser.
@@ -864,6 +876,57 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._send(409 if err else 200, err or "ok", "text/plain; charset=utf-8")
+
+    # -- applications tracker ---------------------------------------------------------------
+
+    def _get_tracked(self, db: DB, job_id: str) -> None:
+        row = next((r for r in db.tracked() if r["id"] == job_id), None)
+        if not row:
+            return self._redirect("/tracker")
+        self._send(200, tracker_page.render_job(row, db.track_events(job_id), now_iso(), bool(db.get_application(job_id))))
+
+    def _post_stage(self) -> None:
+        form = self._form()
+        job_id, stage = form.get("id", [""])[0], form.get("stage", [""])[0]
+        if stage not in tracker.LABELS:
+            return self._send(400, "Unknown stage.", "text/plain; charset=utf-8")
+        db = DB(self.db_path)
+        try:
+            ok = tracker.set_stage(db, job_id, stage, now_iso(), form.get("note", [""])[0])
+        finally:
+            db.close()
+        if not ok:
+            return self._send(404, "That job isn't on your applications.", "text/plain; charset=utf-8")
+        back = form.get("next", [""])[0] == "job"
+        self._redirect(tracker_page.job_link(job_id) if back else "/tracker?done=moved")
+
+    def _post_note(self) -> None:
+        form = self._form()
+        job_id = form.get("id", [""])[0]
+        db = DB(self.db_path)
+        try:
+            tracker.add_note(db, job_id, form.get("note", [""])[0], now_iso())
+        finally:
+            db.close()
+        self._redirect(tracker_page.job_link(job_id))
+
+    def _post_add_application(self) -> None:
+        form = {k: v[0] for k, v in self._form(blank=True).items()}
+        applied = form.get("applied", "")
+        try:
+            applied_at = (datetime.fromisoformat(applied).replace(hour=12).astimezone().astimezone(UTC).isoformat(timespec="seconds")
+                          if applied else now_iso())
+        except ValueError:
+            applied_at = now_iso()
+        db = DB(self.db_path)
+        try:
+            job_id = tracker.add_manual(db, form.get("company", ""), form.get("title", ""), form.get("url", ""),
+                                        form.get("location", ""), form.get("via", ""), applied_at, now_iso())
+        except ValueError:
+            return self._redirect("/tracker?done=missing&add=1")
+        finally:
+            db.close()
+        self._redirect(tracker_page.job_link(job_id))
 
     # -- saved answers ----------------------------------------------------------------------
 

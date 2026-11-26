@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS applications (
     updated_at   TEXT NOT NULL,
     submitted_at TEXT
 );
+-- The tracker's history: each stage change and note on a job you applied to (tracker.py).
+CREATE TABLE IF NOT EXISTS track_events (
+    id          INTEGER PRIMARY KEY,
+    job_id      TEXT NOT NULL,
+    kind        TEXT NOT NULL,      -- stage | note
+    stage       TEXT,               -- the stage it moved to (kind = stage)
+    note        TEXT NOT NULL DEFAULT '',
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS track_events_job ON track_events (job_id, at);
 -- Answers you gave on submitted forms, reused when another form asks the same question (apply/memory.py).
 CREATE TABLE IF NOT EXISTS answer_memory (
     key         TEXT PRIMARY KEY,   -- normalized question label + its options
@@ -101,6 +111,8 @@ CREATE TABLE IF NOT EXISTS answer_memory (
 # Columns added after a table was first created: (table, column, definition).
 ADDED_COLUMNS = (
     ("jobs", "matched_skills", "TEXT"),
+    ("jobs", "stage", "TEXT"),          # where an application stands (tracker.py); NULL unless applied
+    ("jobs", "stage_at", "TEXT"),
     ("answer_memory", "kind", "TEXT NOT NULL DEFAULT 'text'"),
     ("answer_memory", "options", "TEXT"),
     ("answer_memory", "confirmed", "INTEGER NOT NULL DEFAULT 1"),
@@ -153,6 +165,14 @@ class DB:
                 have[table] = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in have[table]:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        # Jobs marked applied before the tracker existed start at the Applied stage, on the day you marked them.
+        with self.conn:
+            rows = self.conn.execute("SELECT id, COALESCE(status_at, first_seen) FROM jobs"
+                                     " WHERE status = 'applied' AND stage IS NULL").fetchall()
+            for job_id, at in rows:
+                self.conn.execute("UPDATE jobs SET stage = 'applied', stage_at = ? WHERE id = ?", (at, job_id))
+                self.conn.execute("INSERT INTO track_events (job_id, kind, stage, at) VALUES (?, 'stage', 'applied', ?)",
+                                  (job_id, at))
 
     def close(self) -> None:
         self.conn.close()
@@ -369,10 +389,52 @@ class DB:
             return self.conn.execute("DELETE FROM answer_memory WHERE key = ?", (key,)).rowcount > 0
 
     def set_status(self, job_id: str, status: str, now: str) -> bool:
+        """Applied starts a job on the tracker; moving it back off Applied (a mis-click) clears its history."""
         if status not in STATUSES:
             raise ValueError(f"status must be one of {STATUSES}")
         with self.conn:
-            cur = self.conn.execute(
-                "UPDATE jobs SET status = ?, status_at = ? WHERE id = ?", (status, now, job_id)
-            )
+            row = self.conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row:
+                return False
+            self.conn.execute("UPDATE jobs SET status = ?, status_at = ? WHERE id = ?", (status, now, job_id))
+            if status == "applied" and row[0] != "applied":
+                self.conn.execute("UPDATE jobs SET stage = 'applied', stage_at = ? WHERE id = ?", (now, job_id))
+                self.conn.execute("INSERT INTO track_events (job_id, kind, stage, at) VALUES (?, 'stage', 'applied', ?)",
+                                  (job_id, now))
+            elif status != "applied" and row[0] == "applied":
+                self.conn.execute("UPDATE jobs SET stage = NULL, stage_at = NULL WHERE id = ?", (job_id,))
+                self.conn.execute("DELETE FROM track_events WHERE job_id = ?", (job_id,))
+        return True
+
+    # The application tracker (tracker.py).
+
+    def set_stage(self, job_id: str, stage: str, now: str, note: str = "") -> bool:
+        with self.conn:
+            cur = self.conn.execute("UPDATE jobs SET stage = ?, stage_at = ? WHERE id = ? AND status = 'applied'",
+                                    (stage, now, job_id))
+            if cur.rowcount:
+                self.conn.execute("INSERT INTO track_events (job_id, kind, stage, note, at) VALUES (?, 'stage', ?, ?, ?)",
+                                  (job_id, stage, note, now))
         return cur.rowcount == 1
+
+    def add_note(self, job_id: str, note: str, now: str) -> bool:
+        with self.conn:
+            if not self.conn.execute("SELECT 1 FROM jobs WHERE id = ? AND status = 'applied'", (job_id,)).fetchone():
+                return False
+            self.conn.execute("INSERT INTO track_events (job_id, kind, note, at) VALUES (?, 'note', ?, ?)",
+                              (job_id, note, now))
+        return True
+
+    def track_events(self, job_id: str | None = None) -> list[dict]:
+        """Events oldest first: one job's, or every tracked job's."""
+        where, params = ("WHERE job_id = ?", (job_id,)) if job_id else ("", ())
+        return [dict(r) for r in self.q(f"SELECT * FROM track_events {where} ORDER BY at, id", params)]
+
+    def tracked(self) -> list[dict]:
+        """Every job you applied to, with when it last moved and whether the agent sent it."""
+        return [dict(r) for r in self.q(
+            "SELECT j.id, j.source, j.board, j.title, j.company, j.location, j.url, j.closed, j.status_at, j.stage,"
+            " j.stage_at, j.ai_score, j.rule_score, a.submitted_at AS agent_at,"
+            " (SELECT MAX(at) FROM track_events t WHERE t.job_id = j.id) AS active_at"
+            " FROM jobs j LEFT JOIN applications a ON a.job_id = j.id AND a.submitted_at IS NOT NULL"
+            " WHERE j.status = 'applied' ORDER BY j.stage_at DESC")]
